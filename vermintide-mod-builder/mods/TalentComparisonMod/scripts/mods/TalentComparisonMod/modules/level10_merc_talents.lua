@@ -47,6 +47,7 @@ local M = {}
 
 local mod   -- set in init()
 local ui    -- shared ui_panel, set in init()
+local l10m_kt       -- shared kill-tracker instance (mod._kill_tracker.new(), created in init)
 local PowerBoost    -- shared power_boost module (from level 15, via mod._power_boost)
 local mtm_boost     -- More the Merrier's power_boost instance (mult 0.05*stacks)
 local ls_boost      -- Limb Splitter's cleave-only power_boost instance (mult 0.5)
@@ -119,6 +120,7 @@ end
 function M.reset()
 	if mtm_boost then mtm_boost:reset() end
 	if ls_boost then ls_boost:reset() end
+	if l10m_kt then l10m_kt:reset() end
 	helborg = new_record()
 	helborg_tb = new_record()
 	helborg_hits = 0
@@ -126,6 +128,14 @@ function M.reset()
 	ls_est_sum = 0
 	ls_est_uncap_sum = 0
 	ls_est_count = 0
+end
+
+-- Kill-column record for `talent` from the shared tracker, or an all-zero default
+-- before its first credit. Helborg tracks two variants ("helborg" Official /
+-- "helborg_tb" TB), mirroring its two Total records.
+local ZERO_KILLS = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
+local function kget(talent)
+	return (l10m_kt and l10m_kt:get(talent)) or ZERO_KILLS
 end
 
 -- ---------------------------------------------------------------------------
@@ -280,6 +290,10 @@ local function account_helborg(ctx, final, health, first)
 		if not crit then
 			local c = recompute_crit(ctx, true)
 			credit_helborg(final, c - final, health, first, 1, true)  -- gain: both variants
+			-- Kill-aware: baseline = real (non-crit) hit, world = the forced crit. The
+			-- gain applies to both variants (Official + TB).
+			l10m_kt:add("helborg", final, c)
+			l10m_kt:add("helborg_tb", final, c)
 			dlog("HELBORG forced-crit zone=%s fin=%.2f crit=%.2f +%.2f", tostring(ctx.hit_zone_name), final, c, c - final)
 		end
 	elseif crit then
@@ -288,6 +302,10 @@ local function account_helborg(ctx, final, health, first)
 		-- Under TB, Merc keeps its random crits, so this suppression does NOT apply to TB.
 		local base = recompute_crit(ctx, false)
 		credit_helborg(base, final - base, health, first, -1, false)  -- suppression: Official only
+		-- Kill-aware (Official only): the talent's world is the WEAKER, suppressed hit
+		-- (with = base < without = the real crit), so it can only delay a kill, never
+		-- pull one sooner. TB keeps random crits, so its variant is unaffected.
+		l10m_kt:add("helborg", final, base)
 		dlog("HELBORG suppress-crit zone=%s fin=%.2f base=%.2f -%.2f", tostring(ctx.hit_zone_name), final, base, final - base)
 	end
 end
@@ -306,7 +324,10 @@ local function on_hit(ctx)
 
 	local target = ctx.target_unit
 	local health = unit_current_health(target)
-	if health and health <= 0 then return end   -- corpse contact, no real damage
+	if health and health <= 0 then          -- corpse contact, no real damage
+		if l10m_kt then l10m_kt:forget(target) end
+		return
+	end
 	local first = (ctx.target_index or 1) <= 1
 	local is_melee = not dp.is_dot
 		and (dp.charge_value == "light_attack" or dp.charge_value == "heavy_attack")
@@ -339,7 +360,16 @@ local function on_hit(ctx)
 
 	-- More the Merrier: extra damage from its +5%/stack power, all sources (the
 	-- power_boost instance self-gates on active() and on whether it is equipped).
-	mtm_boost:account_hit(ctx, is_melee, first, health)
+	local mtm_extra = mtm_boost:account_hit(ctx, is_melee, first, health)
+	if mtm_extra and mtm_extra > 0 then
+		-- Kill-aware: if MtM is equipped the boost is baked into `final` (baseline =
+		-- final - extra); otherwise `final` IS the baseline and the boost adds on top.
+		if talent_equipped(attacker, TALENT_MTM) then
+			l10m_kt:add("mtm", final - mtm_extra, final)
+		else
+			l10m_kt:add("mtm", final, final + mtm_extra)
+		end
+	end
 	-- Limb Splitter has NO per-hit damage component (pure cleave), so it is not
 	-- credited here -- only via the forced-cleave path above / the sweep estimate.
 	-- But sample this real melee cleave-hit (non-first target) damage to build a
@@ -366,6 +396,10 @@ function M.init(owner_mod, ui_panel)
 
 	-- Shared power-boost engine (owned + hooked by level 15, shared via mod._power_boost).
 	PowerBoost = mod._power_boost
+
+	-- Shared kill / Real-Total tracker (owned by level15, which inits first); own instance
+	-- so this panel's Reset zeroes only its rows. More the Merrier / Helborg feed it.
+	l10m_kt = mod._kill_tracker.new()
 
 	-- More the Merrier: a variable-multiplier power boost (0.05 * nearby enemies),
 	-- valued exactly like Enhanced Power (all-source extra damage + extra cleave).
@@ -405,7 +439,8 @@ local T10M_TOTAL_COL = 190
 local T10M_FIRST_COL = 300
 local T10M_UNCAP_COL = 400
 local T10M_CROSS_COL = 490   -- Helborg-only cross column (TB on vanilla / Official on TB)
-local PANEL_W_T10M   = 640
+local T10M_REAL_COL  = 580   -- Real Total: extra damage that actually pulled kills sooner
+local PANEL_W_T10M   = 730
 
 function M.wants_display()
 	return active()
@@ -448,6 +483,7 @@ function M.draw(gui)
 	ui.text(gui, "First Unit", x + T10M_FIRST_COL, row_y(1), small, ui.grey)
 	ui.text(gui, "Uncapped", x + T10M_UNCAP_COL, row_y(1), small, ui.grey)
 	ui.text(gui, cross_header, x + T10M_CROSS_COL, row_y(1), small, ui.grey)
+	ui.text(gui, "Real Total", x + T10M_REAL_COL, row_y(1), small, ui.grey)
 
 	local player_unit = local_player_unit()
 	local ls_equipped = player_unit and talent_equipped(player_unit, TALENT_LS)
@@ -471,6 +507,8 @@ function M.draw(gui)
 	local mtm_total = mtm_boost.total_dmg + (mtm_boost.extra_cleave_dmg or 0)
 	local mtm_uncap = mtm_boost.total_uncapped + (mtm_boost.extra_cleave_uncapped or 0)
 	row(2, "More the Merrier", mtm_total, mtm_boost.first_dmg, mtm_uncap, false)
+	-- Real Total (kill-aware, per-hit only -- the extra-cleave slice has no kill model).
+	ui.text(gui, string.format("%.0f", kget("mtm").real_total), x + T10M_REAL_COL, row_y(2), FONT_SIZE, ui.white)
 
 	-- Limb Splitter: pure cleave -- its Total/Uncapped ARE the extra-cleave damage,
 	-- First has no meaning for cleave. Dashed while actually equipped (the real sweep
@@ -501,6 +539,8 @@ function M.draw(gui)
 		ui.text(gui, string.format("%.0f", ls_total), x + T10M_TOTAL_COL, ls_ry, FONT_SIZE, ui.white)
 		ui.text(gui, "-", x + T10M_FIRST_COL, ls_ry, FONT_SIZE, ui.white)
 		ui.text(gui, string.format("%.0f", ls_uncap), x + T10M_UNCAP_COL, ls_ry, FONT_SIZE, ui.white)
+		-- Pure cleave (no per-hit kill model of its own), so no Real Total.
+		ui.text(gui, "-", x + T10M_REAL_COL, ls_ry, FONT_SIZE, ui.white)
 	end
 
 	-- Helborg's Tutelage: net crit damage (may be negative). Dashed while equipped.
@@ -512,9 +552,14 @@ function M.draw(gui)
 	if hb_equipped then
 		row(4, "Helborgs Tutelage", 0, 0, 0, true)
 		ui.text(gui, "-", x + T10M_CROSS_COL, hb_ry, FONT_SIZE, ui.white)
+		ui.text(gui, "-", x + T10M_REAL_COL, hb_ry, FONT_SIZE, ui.white)
 	else
 		row(4, "Helborgs Tutelage", hb_primary.total_dmg, hb_primary.first_dmg, hb_primary.total_uncapped, false)
 		ui.text(gui, string.format("%.0f", hb_cross.total_dmg), x + T10M_CROSS_COL, hb_ry, FONT_SIZE, ui.white)
+		-- Real Total uses the current mode's variant (TB keeps random crits -> its own
+		-- kill record, tracked separately from Official).
+		ui.text(gui, string.format("%.0f", kget(tb and "helborg_tb" or "helborg").real_total),
+			x + T10M_REAL_COL, hb_ry, FONT_SIZE, ui.white)
 	end
 
 	-- Cleave summary: extra units the higher cleave power reached (measured when the

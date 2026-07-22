@@ -64,6 +64,7 @@ local M = {}
 
 local mod   -- set in init()
 local ui    -- shared ui_panel, set in init()
+local l10_kt   -- shared kill-tracker instance (mod._kill_tracker.new(), created in init)
 
 local DBG = false
 local function dlog(fmt, ...)
@@ -132,11 +133,19 @@ local flense_forced_unit = nil
 
 function M.reset()
 	totals = fresh_totals()
+	if l10_kt then l10_kt:reset() end
 	riposte_window = nil
 	table.clear(sweep_seen)
 	dk_recompute_ext = nil
 	dk_recompute_delta = 0
 	flense_forced_unit = nil
+end
+
+-- Kill-column record for `talent` from the shared tracker, or an all-zero default
+-- before its first credit (Deathknell / Riposte only; Flense has no kill column).
+local ZERO_KILLS = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
+local function kget(talent)
+	return (l10_kt and l10_kt:get(talent)) or ZERO_KILLS
 end
 
 -- ---------------------------------------------------------------------------
@@ -283,7 +292,10 @@ local function on_hit(ctx)
 	local health = unit_current_health(target_unit)
 	-- Corpse contacts (a sweep clipping a dead unit) deal no real damage -- skip so
 	-- they don't inflate any column (matches the level-15 dead-skip guard).
-	if health and health <= 0 then return end
+	if health and health <= 0 then
+		if l10_kt then l10_kt:forget(target_unit) end
+		return
+	end
 	local first = (ctx.target_index or 1) <= 1
 
 	-- --- Flense: bleed DoT ticks. On WHC the "bleed" profile only comes from the
@@ -320,6 +332,8 @@ local function on_hit(ctx)
 			local extra = dk - final
 			if extra > 0 then
 				credit(totals.deathknell, final, extra, health, first)
+				-- Kill-aware: baseline = real (no Deathknell) hit, world = with the bonus.
+				l10_kt:add("deathknell", final, dk)
 				dlog("DEATHKNELL(sim) zone=%s fin=%.2f dk=%.2f extra=%.2f", tostring(ctx.hit_zone_name), final, dk, extra)
 			end
 		else
@@ -327,6 +341,8 @@ local function on_hit(ctx)
 			local extra = final - base
 			if extra > 0 then
 				credit(totals.deathknell, base, extra, health, first)
+				-- Equipped: real `final` already has the bonus, baseline = stripped hit.
+				l10_kt:add("deathknell", base, final)
 				dlog("DEATHKNELL(equipped) zone=%s fin=%.2f base=%.2f extra=%.2f", tostring(ctx.hit_zone_name), final, base, extra)
 			end
 		end
@@ -340,6 +356,8 @@ local function on_hit(ctx)
 			local extra = crit - final
 			if extra > 0 then
 				credit(totals.riposte, final, extra, health, first)
+				-- Kill-aware: baseline = real (non-crit) hit, world = the guaranteed crit.
+				l10_kt:add("riposte", final, crit)
 			end
 			dlog("RIPOSTE zone=%s fin=%.2f crit=%.2f extra=%.2f", tostring(ctx.hit_zone_name), final, crit, crit - final)
 		else
@@ -355,6 +373,10 @@ end
 function M.init(owner_mod, ui_panel)
 	mod = owner_mod
 	ui = ui_panel
+
+	-- Shared kill / Real-Total tracker (owned by level15, which inits first). This panel
+	-- gets its own instance so its Reset zeroes only its rows; Deathknell/Riposte feed it.
+	l10_kt = mod._kill_tracker.new()
 
 	-- Shared entry point called by the level-15 module's single calculate_damage
 	-- hook, once per local-player hit (see level15_talents.lua).
@@ -403,7 +425,8 @@ end
 -- Column x-offsets shared with the Level 15 panel so the two line up visually.
 local T10_TOTAL_COL = 160
 local T10_UNCAP_COL = 350
-local PANEL_W_T10   = 500
+local T10_REAL_COL  = 490   -- Real Total: extra damage that actually pulled kills sooner
+local PANEL_W_T10   = 640
 
 -- Title lists the specific talents this panel compares (descriptor-only style).
 local T10_TITLE = table.concat({
@@ -441,10 +464,11 @@ function M.draw(gui)
 	end
 	if collapsed then return end
 
-	-- No "First Unit" column here (unlike the Stagger panel): Total / Uncapped only.
+	-- No "First Unit" column here (unlike the Stagger panel): Total / Uncapped / Real.
 	ui.text(gui, "Extra Damage:", x, row_y(1), small, ui.grey)
 	ui.text(gui, "Total", x + T10_TOTAL_COL, row_y(1), small, ui.grey)
 	ui.text(gui, "Uncapped", x + T10_UNCAP_COL, row_y(1), small, ui.grey)
+	ui.text(gui, "Real Total", x + T10_REAL_COL, row_y(1), small, ui.grey)
 
 	-- Riposte is only measured when NOT equipped ("value of the talent you didn't
 	-- take"); when it IS equipped its counters carry no meaning, so show dashes.
@@ -458,9 +482,17 @@ function M.draw(gui)
 		if talent == "riposte" and riposte_equipped then
 			ui.text(gui, "-", x + T10_TOTAL_COL, ry, FONT_SIZE, ui.white)
 			ui.text(gui, "-", x + T10_UNCAP_COL, ry, FONT_SIZE, ui.white)
+			ui.text(gui, "-", x + T10_REAL_COL, ry, FONT_SIZE, ui.white)
 		else
 			ui.text(gui, string.format("%.0f", rec.total_dmg), x + T10_TOTAL_COL, ry, FONT_SIZE, ui.white)
 			ui.text(gui, string.format("%.0f", rec.total_uncapped), x + T10_UNCAP_COL, ry, FONT_SIZE, ui.white)
+			-- Real Total is kill-aware; Flense (a DoT with no per-hit kill sequence of
+			-- its own) has none, so it shows a dash.
+			if talent == "flense" then
+				ui.text(gui, "-", x + T10_REAL_COL, ry, FONT_SIZE, ui.white)
+			else
+				ui.text(gui, string.format("%.0f", kget(talent).real_total), x + T10_REAL_COL, ry, FONT_SIZE, ui.white)
+			end
 		end
 	end
 

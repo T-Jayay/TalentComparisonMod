@@ -62,6 +62,7 @@ local ui    -- shared ui_panel, set in init()
 local AttackSpeedSim  -- required in init()
 local PowerBoost      -- shared power_boost module (from level 15, via mod._power_boost)
 local reaper_boost    -- Reikland Reaper's power_boost instance (mult 0.15, gated on PS)
+local l20_kt          -- shared kill-tracker instance (mod._kill_tracker.new(), created in init)
 
 local DBG = false
 local function dlog(fmt, ...)
@@ -160,10 +161,18 @@ function M.reset()
 	-- TB Strike Together: PS procs off a single enemy (>=1 target).
 	st_track   = new_track(ST_TARGETS_TB, ST_SPEED)
 	if reaper_boost then reaper_boost:reset() end
+	if l20_kt then l20_kt:reset() end
 	uptime_total = 0
 	first_swing_t = nil
 	cur_swing = nil
 	ally_tracks = {}
+end
+
+-- Kill-column record for `talent` from the shared tracker, or an all-zero default
+-- before its first credit (Reikland Reaper only; the ghost-swing talents have none).
+local ZERO_KILLS = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
+local function kget(talent)
+	return (l20_kt and l20_kt:get(talent)) or ZERO_KILLS
 end
 
 -- ---------------------------------------------------------------------------
@@ -378,7 +387,10 @@ local function on_hit(ctx)
 
 	local target_unit = ctx.target_unit
 	local health = unit_current_health(target_unit)
-	if health and health <= 0 then return end   -- corpse contact, no real damage
+	if health and health <= 0 then          -- corpse contact, no real damage
+		if l20_kt then l20_kt:forget(target_unit) end
+		return
+	end
 	local first = (ctx.target_index or 1) <= 1
 	local melee = is_melee(dp)
 
@@ -416,7 +428,16 @@ local function on_hit(ctx)
 
 	-- Reikland Reaper +15% power (all sources). The boost self-gates on reaper_gate
 	-- (base Paced Strikes up) and on whether Reaper is already equipped.
-	reaper_boost:account_hit(ctx, melee, first, health)
+	local r_extra = reaper_boost:account_hit(ctx, melee, first, health)
+	if r_extra and r_extra > 0 then
+		-- Kill-aware: if Reaper is equipped the +15% is baked into `final` (baseline =
+		-- final - extra); otherwise `final` IS the baseline and the boost adds on top.
+		if talent_equipped(ctx.attacker_unit, TALENT_REAPER) then
+			l20_kt:add("reaper", final - r_extra, final)
+		else
+			l20_kt:add("reaper", final, final + r_extra)
+		end
+	end
 end
 
 -- ---------------------------------------------------------------------------
@@ -545,6 +566,11 @@ function M.init(owner_mod, ui_panel)
 	-- The level-15 module owns the single shared instance registry (mod._power_boost)
 	-- and installs the hooks that drive every registered boost; it inits first.
 	PowerBoost = mod._power_boost
+
+	-- Shared kill / Real-Total tracker (owned by level15, which inits first); own instance
+	-- so this panel's Reset zeroes only its rows. Reikland Reaper feeds it.
+	l20_kt = mod._kill_tracker.new()
+
 	reaper_boost = PowerBoost.register(PowerBoost.new({
 		mult = REAPER_POWER,
 		talent_equipped = function (unit) return talent_equipped(unit, TALENT_REAPER) end,
@@ -604,7 +630,8 @@ end
 -- First column was removed at the user's request.
 local L20_TOTAL_COL = 200
 local L20_UNCAP_COL = 330
-local PANEL_W_T20   = 500
+local L20_REAL_COL  = 450   -- Real Total: extra damage that actually pulled kills sooner
+local PANEL_W_T20   = 600
 local ui_red = Color(255, 255, 60, 60)
 
 function M.wants_display()
@@ -697,24 +724,30 @@ local function draw_vanilla(gui)
 	ui.text(gui, "Extra Damage:", x, row_y(1 + off), small, ui.grey)
 	ui.text(gui, "Total", x + L20_TOTAL_COL, row_y(1 + off), small, ui.grey)
 	ui.text(gui, "Uncapped", x + L20_UNCAP_COL, row_y(1 + off), small, ui.grey)
+	ui.text(gui, "Real Total", x + L20_REAL_COL, row_y(1 + off), small, ui.grey)
 
 	local r_total = reaper_boost.total_dmg + (reaper_boost.extra_cleave_dmg or 0)
 	local r_uncap = reaper_boost.total_uncapped + (reaper_boost.extra_cleave_uncapped or 0)
 	ui.text(gui, "Reikland Reaper", x, row_y(2 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", r_total), x + L20_TOTAL_COL, row_y(2 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", r_uncap), x + L20_UNCAP_COL, row_y(2 + off), FONT_SIZE, ui.white)
+	-- Real Total (kill-aware, per-hit only -- the extra-cleave slice has no kill model).
+	ui.text(gui, string.format("%.0f", kget("reaper").real_total), x + L20_REAL_COL, row_y(2 + off), FONT_SIZE, ui.white)
 
 	-- Enhanced Training: ghost-swing extra damage (ET timeline vs base PS timeline).
 	local et_extra = et_track.sim:extra() - base_track.sim:extra()
 	ui.text(gui, "Enhanced Training", x, row_y(3 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", et_extra), x + L20_TOTAL_COL, row_y(3 + off), FONT_SIZE, ui.white)
 	ui.text(gui, "ESTIMATION", x + L20_UNCAP_COL, row_y(3 + off), small, ui.grey)
+	-- Ghost-swing attack-speed estimate: no per-hit kill model, so no Real Total.
+	ui.text(gui, "-", x + L20_REAL_COL, row_y(3 + off), FONT_SIZE, ui.white)
 
 	-- Strike Together: extra ally damage from the spread +10% attack speed (forced on
 	-- allies while active; measured against their own down-sampled swing streams).
 	ui.text(gui, "Strike Together", x, row_y(4 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", st_total()), x + L20_TOTAL_COL, row_y(4 + off), FONT_SIZE, ui.white)
 	ui.text(gui, "ESTIMATION", x + L20_UNCAP_COL, row_y(4 + off), small, ui.grey)
+	ui.text(gui, "-", x + L20_REAL_COL, row_y(4 + off), FONT_SIZE, ui.white)
 
 	-- Uptime comparison: base Paced Strikes vs Enhanced Training's harder proc.
 	ui.text(gui, string.format("Paced Strikes uptime: base %.0f%%  vs  ET %.0f%%",
@@ -801,23 +834,27 @@ local function draw_tb(gui)
 	ui.text(gui, "Extra Damage:", x, row_y(1 + off), small, ui.grey)
 	ui.text(gui, "Total", x + L20_TOTAL_COL, row_y(1 + off), small, ui.grey)
 	ui.text(gui, "Uncapped", x + L20_UNCAP_COL, row_y(1 + off), small, ui.grey)
+	ui.text(gui, "Real Total", x + L20_REAL_COL, row_y(1 + off), small, ui.grey)
 
 	local r_total = reaper_boost.total_dmg + (reaper_boost.extra_cleave_dmg or 0)
 	local r_uncap = reaper_boost.total_uncapped + (reaper_boost.extra_cleave_uncapped or 0)
 	ui.text(gui, "Reikland Reaper", x, row_y(2 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", r_total), x + L20_TOTAL_COL, row_y(2 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", r_uncap), x + L20_UNCAP_COL, row_y(2 + off), FONT_SIZE, ui.white)
+	ui.text(gui, string.format("%.0f", kget("reaper").real_total), x + L20_REAL_COL, row_y(2 + off), FONT_SIZE, ui.white)
 
 	-- Enhanced Training: +20% AS on a >=3-target proc (TB threshold) vs base +10%@>=3.
 	local et_extra = et_track.sim:extra() - base_track.sim:extra()
 	ui.text(gui, "Enhanced Training", x, row_y(3 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", et_extra), x + L20_TOTAL_COL, row_y(3 + off), FONT_SIZE, ui.white)
 	ui.text(gui, "ESTIMATION", x + L20_UNCAP_COL, row_y(3 + off), small, ui.grey)
+	ui.text(gui, "-", x + L20_REAL_COL, row_y(3 + off), FONT_SIZE, ui.white)
 
 	-- Strike Together: extra damage (you + allies) from single-enemy PS procs over >=3.
 	ui.text(gui, "Strike Together", x, row_y(4 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", st_total()), x + L20_TOTAL_COL, row_y(4 + off), FONT_SIZE, ui.white)
 	ui.text(gui, "ESTIMATION", x + L20_UNCAP_COL, row_y(4 + off), small, ui.grey)
+	ui.text(gui, "-", x + L20_REAL_COL, row_y(4 + off), FONT_SIZE, ui.white)
 
 	-- Uptime comparison: base Paced Strikes (>=3) vs Strike Together's single-enemy proc.
 	ui.text(gui, string.format("Paced Strikes uptime: base %.0f%%  vs  Strike Together %.0f%%",
