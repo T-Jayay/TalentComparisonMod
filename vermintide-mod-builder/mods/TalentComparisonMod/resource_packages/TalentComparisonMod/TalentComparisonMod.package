@@ -1,0 +1,12 @@
+mod = [
+	"TalentComparisonMod"
+]
+
+package = [
+	"resource_packages/TalentComparisonMod/TalentComparisonMod"
+]
+
+lua = [
+	"scripts/mods/TalentComparisonMod/*"
+	"scripts/mods/TalentComparisonMod/modules/*"
+]

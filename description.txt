@@ -1,0 +1,38 @@
+Ever wonder how much value the talents you [i]didn't[/i] pick would have given you? This mod shows you running totals for your current run. For each talent in a row, it displays how much that talent [i]would have[/i] provided based on your real hits this run, whether or not you have it equipped. Each talent row gets its own on-screen panel that you can toggle, drag, and reset.
+[b]Most accurate when you are the host.[/b]
+[hr][/hr]
+[h2]Temp Health (Level 5)[/h2]
+Shows how much temporary health each Level 5 talent would have generated for you this run:
+[list]
+[*][b]Sting[/b] — from your first-target melee hits
+[*][b]Carve[/b] — from cleaving through multiple targets
+[*][b]Execute[/b] — from your melee kills
+[*][b]Second Wind[/b] — from staggering enemies
+[/list]
+So you can see at a glance which THP talent would actually have kept you healthiest for [i]your[/i] playstyle this run.
+Optional extra columns: how much of that healing would have [b]decayed[/b] away unused, what [b]percentage of the time[/b] each talent's healing would be actively decaying, and how much real [b]damage[/b] each talent's healing would have absorbed.
+[hr][/hr]
+[h2]Stagger Talents (Level 15)[/h2]
+Shows the extra melee damage each Level 15 stagger talent would have added this run, as [b]Total[/b] and [b]First-target[/b] running totals:
+[list]
+[*][b]Mainstay[/b] — bonus damage vs. staggered / multi-staggered enemies
+[*][b]Smiter[/b] — first enemy hit counts as staggered
+[*][b]Bulwark[/b] — enemies you stagger take extra melee damage for a few seconds
+[*][b]Assassin[/b] — bonus damage vs. staggered, boosted on crits/headshots
+[*][b]Enhanced Power[/b] — a flat Power Level boost affecting damage, cleave, and stagger
+[/list]
+A [b]Force Enhanced Power[/b] option can enable the extra cleave that Enhanced Power would grant, so you can see the additional enemies and damage it would physically hit.
+[hr][/hr]
+[h2]Other Comparison Panels[/h2]
+The mod also includes career-specific comparison panels:
+[list]
+[*][b]Witch Hunter Captain — Level 10[/b] (Riposte / Deathknell / Flense)
+[*][b]Mercenary — Level 20[/b] (Reikland Reaper / Enhanced Training / Strike Together)
+[*][b]Career Skill Cooldown Refund[/b] — how much of your ultimate's cooldown was refunded by combat, plus a Mercenary "Ready for Action" panel
+[/list]
+[hr][/hr]
+[h2]About Attack Speed Estimations[/h2]
+Some talents (like the Mercenary Level 20 row) grant [b]bonus attack speed[/b], which is hard to value directly. This mod estimates it with a "ghost swing" model: it takes your real swings this run and simulates the extra swings you [i]would have[/i] landed at the higher attack speed, valuing each ghosted swing at the damage of a real one. Because this assumes you'd have kept swinging non-stop, these attack-speed numbers are an [b]upper-bound estimate[/b], not an exact figure, treat them as "best case" value.
+[hr][/hr]
+[h2]Tourney Balance Support[/h2]
+If the [b]Tourney Balance[/b] mod is loaded, the panels automatically switch to Tourney Balance's reworked talent numbers so the comparisons stay accurate.

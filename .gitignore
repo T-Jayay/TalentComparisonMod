@@ -1,0 +1,11 @@
+# Decompiled game source (huge, not ours to redistribute)
+vermintide-1-source-code/
+vermintide-2-source-code/
+
+# VMB build cache/output
+vermintide-mod-builder/mods/.temp/
+vermintide-mod-builder/mods/*/.temp/
+vermintide-mod-builder/*.log
+
+# IDE
+.idea/
