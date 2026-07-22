@@ -62,7 +62,7 @@ local ui    -- shared ui_panel, set in init()
 
 -- Debug logging: per-hit inputs + per-talent outputs so the stagger-number
 -- model / EP recompute can be verified by hand. Flip DBG off to silence.
-local DBG = true
+local DBG = false
 local function dlog(fmt, ...)
 	if DBG and mod then
 		local ok, s = pcall(string.format, "[TCM] " .. fmt, ...)
@@ -200,6 +200,22 @@ local KILL_TALENTS = { "smiter", "mainstay", "bulwark", "assassin", "enhanced" }
 -- talent -> { n = <earlier kills>, hpk_sum, hpk_n = running hits-per-kill }
 local kills
 local unit_state   -- target_unit -> per-unit accumulators (see kill_track)
+-- Kill-tracking is DEFERRED from account_hit (which runs at calculate_damage time,
+-- BEFORE the hit is applied) to the health-extension add_damage hook, where the
+-- REAL applied damage is known. calculate_damage's return understates the real hit
+-- by any post-calc attacker buff (e.g. Slayer's stack damage via on_damage_dealt /
+-- apply_buffs_to_damage) -- a talent-independent factor K = real/model. Scaling
+-- every hypothetical world by K makes the kill-threshold crossing match reality, so
+-- a hit that really one-shot an enemy no longer looks like a talent-provided early
+-- kill. pending_credit[target] is a FIFO of hits awaiting their real damage.
+local pending_credit = {}
+local PENDING_STALE = 0.5   -- s; flush unmatched hits (K=1) if no add_damage arrives
+
+local function game_time()
+	local ok, t = pcall(function () return Managers.time:time("game") end)
+	if ok and t then return t end
+	return 0
+end
 
 local function fresh_kills()
 	local k = {}
@@ -248,6 +264,9 @@ local function kill_track(target_unit, talent, without_add, with_add, health, re
 		st.frozen[talent] = h
 		if wo < st.init then
 			kills[talent].n = kills[talent].n + 1
+			dlog("EARLYKILL %s unit=%s hit=%d init=%.2f | with=%.2f (this+%.2f) without=%.2f (this+%.2f)",
+				talent, tostring((AiUtils.unit_breed(target_unit) or {}).name), h, st.init,
+				w, with_add, wo, without_add)
 		end
 		-- REAL TOTAL: of the extra damage banked into this unit, how much actually
 		-- contributed to killing it sooner. At the talent-world killing hit K, the
@@ -278,15 +297,64 @@ local function kill_track(target_unit, talent, without_add, with_add, health, re
 	end
 end
 
+-- Enqueue one credited melee hit's per-talent baseline/with pairs so kill-tracking
+-- can be run later against the REAL applied damage. `entries` is a list of
+-- { talent, without, with } (the UNSCALED model damages); `model_final` is the
+-- calculate_damage return used to derive the scale factor K = real/model_final.
+local function enqueue_kill_credit(target_unit, model_final, health, entries)
+	local q = pending_credit[target_unit]
+	if not q then q = {}; pending_credit[target_unit] = q end
+	q[#q + 1] = { model_final = model_final, health = health, entries = entries,
+		t = game_time() }
+end
+
+-- Run kill-tracking for the oldest pending hit on `target_unit`, scaling every
+-- modeled damage by K = real_damage / model_final (talent-independent) so the
+-- kill-threshold crossing matches what actually happened in-game. real_damage nil
+-- (stale flush) -> K = 1, i.e. fall back to the raw model.
+local function flush_kill_credit(target_unit, real_damage)
+	local q = pending_credit[target_unit]
+	if not q or #q == 0 then return false end
+	local rec = table.remove(q, 1)
+	if #q == 0 then pending_credit[target_unit] = nil end
+	local K = 1
+	if real_damage and rec.model_final and rec.model_final > 0 then
+		K = real_damage / rec.model_final
+	end
+	local real_kill = rec.health and real_damage and (rec.health - real_damage <= 0) or false
+	for _, e in ipairs(rec.entries) do
+		kill_track(target_unit, e.talent, e.without * K, e["with"] * K, rec.health, real_kill)
+	end
+	dlog("FLUSH unit=%s real=%s model=%.2f K=%.3f rk=%s",
+		tostring((AiUtils.unit_breed(target_unit) or {}).name),
+		tostring(real_damage), rec.model_final or -1, K, tostring(real_kill))
+	return true
+end
+
 function M.reset()
 	totals = fresh_totals()
 	kills = fresh_kills()
 	table.clear(unit_state)
 	table.clear(bulwark_marks)
+	table.clear(pending_credit)
 	if enhanced_boost then enhanced_boost:reset() end
 	table.clear(sweep_seen)
 	ally_ctx = nil
 	self_ctx = nil
+end
+
+-- Flush any queued kill-credits whose real-damage add_damage never arrived (enemy
+-- uses a health extension we don't hook, hit dealt no damage, etc.). These flush at
+-- K=1 -- the previous raw-model behaviour -- so no hit is ever silently dropped.
+function M.update(dt)
+	if not next(pending_credit) then return end
+	local now = game_time()
+	for target, q in pairs(pending_credit) do
+		while q[1] and (now - q[1].t) >= PENDING_STALE do
+			flush_kill_credit(target, nil)
+			if pending_credit[target] ~= q then break end
+		end
+	end
 end
 
 local function local_player_unit()
@@ -302,12 +370,6 @@ end
 -- so we fall back to time-window dedupe of the client-side prediction.
 local function is_host()
 	return (Managers.player and Managers.player.is_server) and true or false
-end
-
-local function game_time()
-	local ok, t = pcall(function () return Managers.time:time("game") end)
-	if ok and t then return t end
-	return 0
 end
 
 -- True if `buff_ext` has any of the named buff types (equipped-talent detection;
@@ -610,6 +672,10 @@ local function account_hit(ctx)
 		end
 	end
 
+	-- Per-talent baseline/with pairs for kill-tracking, collected here and enqueued
+	-- for a DEFERRED flush against the real applied damage (see enqueue_kill_credit).
+	local kt_entries = {}
+
 	-- Stagger-number talents (Smiter / Mainstay / Assassin). TB removed Mainstay,
 	-- so it credits nothing while the TB mod is loaded (its row is hidden too).
 	local skip_mainstay = tb_mod_active()
@@ -621,7 +687,8 @@ local function account_hit(ctx)
 		extras[talent] = base_damage * (bonus_no_aura(sn) - base_bonus)
 		credit(talent, extras[talent])
 		-- Earlier-kill: baseline = no-talent damage, world = baseline + this extra.
-		kill_track(target_unit, talent, base_no_talent, base_no_talent + extras[talent], health, real_kill)
+		kt_entries[#kt_entries + 1] = { talent = talent, without = base_no_talent,
+			["with"] = base_no_talent + extras[talent] }
 		end
 	end
 
@@ -639,12 +706,19 @@ local function account_hit(ctx)
 	-- Earlier-kill for Bulwark: accumulate every melee hit (extra 0 when the aura
 	-- is down) so cumulative damage carries across hits; a kill only counts on a
 	-- hit whose aura pushed cumulative past the threshold the no-aura world hadn't.
-	kill_track(target_unit, "bulwark", base_no_talent, base_no_talent + bw_extra, health, real_kill)
+	kt_entries[#kt_entries + 1] = { talent = "bulwark", without = base_no_talent,
+		["with"] = base_no_talent + bw_extra }
 
 	-- Enhanced Power earlier-kill on the SAME no-L15 base as the stagger talents
 	-- (melee only), so its bigger per-hit boost crosses the kill threshold sooner and
 	-- it reads the LOWEST Hits/Kill -- consistent with also having the most Early Kills.
-	kill_track(target_unit, "enhanced", base_no_talent, base_no_talent + ep_extra, health, real_kill)
+	kt_entries[#kt_entries + 1] = { talent = "enhanced", without = base_no_talent,
+		["with"] = base_no_talent + ep_extra }
+
+	-- Enqueue the collected pairs for a deferred flush against the real applied
+	-- damage (the health-extension add_damage hook), so the kill-threshold crossing
+	-- uses reality, not the post-calc-buff-understated calculate_damage return.
+	enqueue_kill_credit(target_unit, final_damage, health, kt_entries)
 
 	-- One line per credited melee hit with every input the model used, so each
 	-- talent's extra can be recomputed by hand from the log.
@@ -878,6 +952,27 @@ function M.init(owner_mod, ui_panel)
 
 		return final
 	end)
+
+	-- Real applied damage -> deferred kill-tracking. calculate_damage's return (what
+	-- account_hit models from) understates the real hit by any post-calc attacker
+	-- buff (e.g. Slayer stack damage via on_damage_dealt / apply_buffs_to_damage).
+	-- The health-extension add_damage runs just after, with the REAL damage, so we
+	-- flush the matching queued hit here and scale its kill-tracking by K=real/model.
+	-- Covers the common enemy health extensions; anything else falls back to the
+	-- stale flush in M.update (K=1, i.e. the previous raw-model behaviour).
+	local function on_real_damage(self, attacker_unit, damage_amount)
+		if attacker_unit ~= local_player_unit() then return end
+		local unit = self.unit or (self.get_unit and self:get_unit())
+		if unit then flush_kill_credit(unit, damage_amount) end
+	end
+	for _, cls_name in ipairs({ "GenericHealthExtension", "BeastmenStandardHealthExtension" }) do
+		local cls = rawget(_G, cls_name)
+		if cls then
+			mod:hook_safe(cls, "add_damage", function (self, attacker_unit, damage_amount)
+				on_real_damage(self, attacker_unit, damage_amount)
+			end)
+		end
+	end
 
 	-- Ally-Bulwark context (HOST ONLY -- server_apply_hit does not run on a pure
 	-- client). We cannot add a second mod:hook on DamageUtils.server_apply_hit --
