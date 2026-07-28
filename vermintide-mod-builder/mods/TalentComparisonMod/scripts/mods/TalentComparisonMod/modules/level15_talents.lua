@@ -130,7 +130,10 @@ local TALENT15_NAMES = {
 -- ---------------------------------------------------------------------------
 -- Running totals
 -- ---------------------------------------------------------------------------
-local totals   -- per-talent { total_dmg, first_dmg } for the stagger talents
+local totals   -- ACTIVE per-talent record set: points at totals_cat[cat] during
+               -- crediting (set per hit) and at a merged view during draw.
+local totals_cat  -- { es=, mon=, trash= }, each a full fresh_totals() set.
+local F        -- unit_filter (mod._filter), set in init
 -- Enhanced Power is now valued by a shared power_boost.lua instance (extra damage,
 -- source split and cleave), reused by the level-20 Reikland Reaper module. Set in init.
 local PowerBoost    -- the shared module (dofiled once, shared via mod._power_boost)
@@ -178,7 +181,13 @@ local function fresh_totals()
 	return t
 end
 
-totals = fresh_totals()
+-- Three independent record sets, one per unit category (es / mon / trash).
+local function fresh_totals_cat()
+	return { es = fresh_totals(), mon = fresh_totals(), trash = fresh_totals() }
+end
+
+totals_cat = fresh_totals_cat()
+totals = totals_cat.trash
 
 -- ---------------------------------------------------------------------------
 -- Earlier-kill tracking. Per talent, count units that would have died EARLIER
@@ -226,7 +235,8 @@ end
 -- them against the real applied damage via KillTracker.on_real_damage.
 
 function M.reset()
-	totals = fresh_totals()
+	totals_cat = fresh_totals_cat()
+	totals = totals_cat.trash
 	if l15_kt then l15_kt:reset() end
 	if KillTracker then KillTracker.clear_pending() end
 	table.clear(bulwark_marks)
@@ -430,6 +440,10 @@ local function account_hit(ctx)
 			tostring((AiUtils.unit_breed(target_unit) or {}).name), target_index, final_damage)
 		return
 	end
+
+	-- Route all crediting for this hit into the target's unit-category record set.
+	local cat = ctx.cat or F.cat_of(target_unit)
+	totals = totals_cat[cat]
 
 	-- Is THIS hit the real killing blow you landed? (health is pre-hit HP; final_damage
 	-- is the real damage this hit applies.) Drives the hits-per-kill running average.
@@ -667,9 +681,11 @@ local function account_ally_bulwark(target_unit, attacker_unit, hit_zone_name, i
 	-- Corpse contacts (health already 0) deal no real damage -- skip entirely.
 	local health = unit_current_health(target_unit)
 	if health and health <= 0 then return end
+	local cat = F.cat_of(target_unit)
+	totals = totals_cat[cat]
 	-- Earlier-kill: this ally hit's extra shares Bulwark's per-unit pool with the
 	-- self hits, so an ally finishing a unit early thanks to YOUR aura counts too.
-	l15_kt:track(target_unit, "bulwark", final_damage - extra, final_damage, health)
+	l15_kt:track(target_unit, "bulwark", final_damage - extra, final_damage, health, nil, cat)
 	local capped = useful_extra(final_damage - extra, extra, health)
 
 	local rec = totals.bulwark
@@ -726,6 +742,7 @@ end
 function M.init(owner_mod, ui_panel)
 	mod = owner_mod
 	ui = ui_panel
+	F = mod._filter
 
 	-- Shared power-boost engine: valued once here for Enhanced Power, and shared
 	-- via mod._power_boost so the level-20 Reikland Reaper module registers its own
@@ -740,10 +757,15 @@ function M.init(owner_mod, ui_panel)
 	mod._kill_tracker = KillTracker
 	l15_kt = KillTracker.new()
 
+	-- Wire per-unit-category bucketing into the shared engines: kill_tracker merges
+	-- kills by the active filter; power_boost buckets its extra-damage by target.
+	KillTracker.set_filter(function () return F.get_filter() end)
+	PowerBoost.set_category_fns(F.cat_of, F.get_filter)
+
 	enhanced_boost = PowerBoost.register(PowerBoost.new({
 		mult = ep_power_bonus,   -- 0.075 vanilla / 0.10 under Tourney Balance (resolved live)
 		buff_type = "power_level_unbalance",           -- "already equipped" detector
-		force_enabled = function () return mod:get("force_ep") end,  -- general force-cleave button
+		force_enabled = function () return mod._gameplay_on("force_ep") end,  -- gameplay-gated force-cleave
 	}))
 
 	mod._on_player_stagger = on_player_stagger
@@ -805,7 +827,8 @@ function M.init(owner_mod, ui_panel)
 			-- deferred flush against the real applied damage (the add_damage hook). One
 			-- batch per genuine hit; duplicate/deduped calculate_damage calls add nothing
 			-- and the empty batch is dropped by commit_hit.
-			KillTracker.begin_hit(target_unit, final, unit_current_health(target_unit))
+			ctx.cat = mod._filter.cat_of(target_unit)
+			KillTracker.begin_hit(target_unit, final, unit_current_health(target_unit), ctx.cat)
 
 			pcall(account_hit, ctx)
 
@@ -890,7 +913,7 @@ function M.init(owner_mod, ui_panel)
 				-- Opened regardless of show_level15 so totals keep accumulating while
 				-- the panel is hidden.
 				self_ctx = { target = target_unit, credited = false }
-			elseif mod:get("show_level15") and is_player_unit(attacker_unit) then
+			elseif is_player_unit(attacker_unit) then
 				ally_ctx = { attacker = attacker_unit, target = target_unit, credited = false }
 			end
 		end
@@ -956,23 +979,24 @@ local function extra_shown()
 end
 
 function M.wants_display()
-	return mod:get("show_level15")
+	return true
 end
 
 -- Full snapshot of every displayed value; called by reset_all just before the
 -- totals are cleared (Reset button, keybind, and mission-entry reset).
 function M.log_state()
 	if not DBG then return end
+	local totals = F.merge_sets(totals_cat)
 	local ep = enhanced_boost
 	dlog("L15 SNAP total/first (uncap): sm=%.1f/%.1f (%.1f) ms=%.1f/%.1f (%.1f) bw=%.1f/%.1f (%.1f, ally %.1f) as=%.1f/%.1f (%.1f) ep=%.1f/%.1f (%.1f) | ep cleave +%d units +%.1f dmg (uncap %.1f)",
 		totals.smiter.total_dmg, totals.smiter.first_dmg, totals.smiter.total_uncapped,
 		totals.mainstay.total_dmg, totals.mainstay.first_dmg, totals.mainstay.total_uncapped,
 		totals.bulwark.total_dmg, totals.bulwark.first_dmg, totals.bulwark.total_uncapped, totals.bulwark.ally_dmg or 0,
 		totals.assassin.total_dmg, totals.assassin.first_dmg, totals.assassin.total_uncapped,
-		ep.total_dmg, ep.first_dmg, ep.total_uncapped,
-		ep.extra_units_hit or 0, ep.extra_cleave_dmg or 0, ep.extra_cleave_uncapped or 0)
+		ep:rd("total_dmg"), ep:rd("first_dmg"), ep:rd("total_uncapped"),
+		ep:units_hit(), ep:rd("extra_cleave_dmg"), ep:rd("extra_cleave_uncapped"))
 	dlog("L15 SNAP ep sources (capped): melee=%.1f ranged=%.1f other=%.1f",
-		ep.src_melee or 0, ep.src_ranged or 0, ep.src_other or 0)
+		ep:rd("src_melee"), ep:rd("src_ranged"), ep:rd("src_other"))
 	local function hpk(t) local k = kget(t) return k.hpk_n > 0 and k.hpk_sum / k.hpk_n or 0 end
 	dlog("L15 SNAP early kills (n) / hits-per-kill / real-total: sm=%d/%.1f/%.0f ms=%d/%.1f/%.0f bw=%d/%.1f/%.0f as=%d/%.1f/%.0f ep=%d/%.1f/%.0f",
 		kget("smiter").n, hpk("smiter"), kget("smiter").real_total,
@@ -991,6 +1015,9 @@ end
 function M.draw(gui)
 	local FONT_SIZE = ui.FONT_SIZE
 	local small = FONT_SIZE - 6
+
+	-- Merge the category record sets the current filter selects into one read view.
+	local totals = F.merge_sets(totals_cat)
 
 	local show_extra = extra_shown()
 	local tb = tb_mod_active()
@@ -1016,7 +1043,13 @@ function M.draw(gui)
 	if not x then return end
 
 	if title_visible then
-		ui.text_bold(gui, tb and "Stagger Talents (TB):" or "Stagger Talents:", x, row_y(0), FONT_SIZE, ui.yellow)
+		-- Flag the unequipped-row mode in the title: every column is then a true
+		-- hypothetical over the same no-talent baseline.
+		local title = tb and "Stagger Talents (TB):" or "Stagger Talents:"
+		if mod._gameplay_live and mod._gameplay_live.unequip_l15 then
+			title = title .. "  [row unequipped]"
+		end
+		ui.text_bold(gui, title, x, row_y(0), FONT_SIZE, ui.yellow)
 	end
 	if collapsed then return end
 
@@ -1036,9 +1069,9 @@ function M.draw(gui)
 		-- The stagger talents come from `totals` and have no cleave component.
 		local total, first, uncapped
 		if talent == "enhanced" then
-			total = enhanced_boost.total_dmg + (enhanced_boost.extra_cleave_dmg or 0)
-			first = enhanced_boost.first_dmg
-			uncapped = enhanced_boost.total_uncapped + (enhanced_boost.extra_cleave_uncapped or 0)
+			total = enhanced_boost:rd("total_dmg") + enhanced_boost:rd("extra_cleave_dmg")
+			first = enhanced_boost:rd("first_dmg")
+			uncapped = enhanced_boost:rd("total_uncapped") + enhanced_boost:rd("extra_cleave_uncapped")
 		else
 			local rec = totals[talent]
 			total, first, uncapped = rec.total_dmg, rec.first_dmg, rec.total_uncapped
@@ -1069,17 +1102,17 @@ function M.draw(gui)
 	-- minus the extra-cleave slice below).
 	local ep = enhanced_boost
 	ui.text(gui, string.format("EP sources: Melee +%.0f  Ranged +%.0f  Other +%.0f dmg",
-		ep.src_melee or 0, ep.src_ranged or 0, ep.src_other or 0),
+		ep:rd("src_melee"), ep:rd("src_ranged"), ep:rd("src_other")),
 		x, row_y(n + 3), small, ui.grey)
 
 	-- Enhanced Power extra-cleave summary.
 	local ep_line
-	if mod:get("force_ep") then
+	if mod._gameplay_on("force_ep") then
 		ep_line = string.format("EP cleave: +%d units, +%.0f dmg  (without +cleave: %.0f)",
-			ep.extra_units_hit, ep.extra_cleave_dmg, ep.total_dmg)
+			ep:units_hit(), ep:rd("extra_cleave_dmg"), ep:rd("total_dmg"))
 	else
 		ep_line = string.format("EP cleave (est): +%d units  (without +cleave: %.0f)",
-			ep.extra_units_hit, ep.total_dmg)
+			ep:units_hit(), ep:rd("total_dmg"))
 	end
 	ui.text(gui, ep_line, x, row_y(n + 4), small, ui.grey)
 end

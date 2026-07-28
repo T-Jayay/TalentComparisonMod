@@ -127,6 +127,17 @@ local function mouse_left_down()
 	return ok and val
 end
 
+-- Exposed for the control panel, which hit-tests its own buttons.
+ui.point_in_box   = point_in_box
+ui.get_mouse      = get_mouse
+ui.mouse_left_down = mouse_left_down
+
+-- The "pressed edge" (down this frame but not last), consistent across panels
+-- because ui.end_frame latches mouse_down_last once after all panels draw.
+function ui.pressed_edge()
+	return mouse_left_down() and not mod._mouse_down_last
+end
+
 -- Called once per update, after all panels have drawn, so the "pressed edge"
 -- (down this frame but not last) is consistent across panels.
 function ui.end_frame(cursor_active)
@@ -152,11 +163,9 @@ end
 -- opts (optional table):
 --   extra_btn : { label = string, on_click = fn } drawn as a second button to
 --               the right of Reset (e.g. the L15 details toggle).
--- Returns a 4th value, `collapsed`: when true the caller should draw at most
--- the title (row_y(0)) and skip all other rows/columns, since ui.frame itself
--- already suppressed the background panel and Reset/extra buttons. Returns a
--- 5th value, `title_visible`: false when collapsed and the cursor isn't active,
--- so the caller should skip drawing the title too (mirrors the Hide button).
+-- Per-panel show/hide is now handled globally by the control panel's Hide button
+-- (mod._hide_all), so ui.frame no longer draws its own Hide toggle. It draws the
+-- background panel, handles dragging, and draws the Reset (+ optional extra) button.
 function ui.frame(gui, panel_w, content_rows, pos_x_id, pos_y_id, default_x_frac, default_y_frac, drag_key, reset_fn, opts)
 	-- Resolution not resolved yet (e.g. very early load): skip this frame.
 	if not RESOLUTION_LOOKUP or not RESOLUTION_LOOKUP.res_w or not RESOLUTION_LOOKUP.res_h then
@@ -164,9 +173,6 @@ function ui.frame(gui, panel_w, content_rows, pos_x_id, pos_y_id, default_x_frac
 	end
 
 	opts = opts or {}
-
-	local collapse_id = "collapsed_" .. drag_key
-	local collapsed = mod:get(collapse_id)
 
 	local panel_bottom_drop = content_rows * LINE_HEIGHT + BTN_H + PAD
 	local panel_top_rise = FONT_SIZE + PAD
@@ -188,64 +194,48 @@ function ui.frame(gui, panel_w, content_rows, pos_x_id, pos_y_id, default_x_frac
 	local btn_bottom = row_y(content_rows) - BTN_H
 	local panel_top = top + panel_top_rise
 
-	-- Hide/show toggle lives at the very top of the box, right-aligned, and is
-	-- always drawn (even while collapsed) so the panel can be brought back. It
-	-- sits above the title/header row so it never overlaps that text.
-	local hide_x = x - PAD + panel_w - HIDE_BTN_W
-	local hide_bottom = panel_top - BTN_H
-
 	local cursor_active = ui.cursor_active()
+
+	-- Background panel (always drawn behind the rows).
+	local panel_bottom = btn_bottom - PAD
+	local panel_h = panel_top - panel_bottom
+	ui.rect(gui, x - PAD, panel_bottom, panel_w, panel_h, Color(160, 20, 20, 20), 850)
 
 	if cursor_active then
 		local mx, my = get_mouse()
 		local down = mouse_left_down()
 		local pressed_edge = down and not mod._mouse_down_last
 
-		local hover_hide = point_in_box(mx, my, hide_x, hide_bottom, HIDE_BTN_W, BTN_H)
-		ui.rect(gui, hide_x, hide_bottom, HIDE_BTN_W, BTN_H,
-			hover_hide and Color(220, 70, 70, 90) or Color(200, 45, 45, 65), 861)
-		ui.text(gui, collapsed and "Show" or "Hide", hide_x + 10, hide_bottom + 4, FONT_SIZE - 6, Color(255, 255, 255, 255))
-
-		-- Title row (excluding the hide button) still drags the panel while collapsed.
-		local title_row_bottom = collapsed and hide_bottom or (top - FONT_SIZE - 4)
-		local hover_drag = not hover_hide and point_in_box(mx, my, x - PAD, title_row_bottom, panel_w, panel_top - title_row_bottom)
-
-		if pressed_edge and hover_hide then
-			mod:set(collapse_id, not collapsed)
-			collapsed = not collapsed
-		elseif pressed_edge and hover_drag then
+		-- Title row drags the panel.
+		local title_row_bottom = top - FONT_SIZE - 4
+		local hover_drag = point_in_box(mx, my, x - PAD, title_row_bottom, panel_w, panel_top - title_row_bottom)
+		if pressed_edge and hover_drag then
 			mod._drag_key = drag_key
 			mod._drag_dx = x - mx
 			mod._drag_dy = top - my
 		end
 
-		if not collapsed then
-			local panel_bottom = btn_bottom - PAD
-			local panel_h = panel_top - panel_bottom
-			ui.rect(gui, x - PAD, panel_bottom, panel_w, panel_h, Color(160, 20, 20, 20), 850)
+		local hover_reset = point_in_box(mx, my, btn_x, btn_bottom, BTN_W, BTN_H)
+		ui.rect(gui, btn_x, btn_bottom, BTN_W, BTN_H,
+			hover_reset and Color(220, 90, 40, 40) or Color(200, 50, 25, 25), 860)
+		ui.text(gui, "Reset", btn_x + 18, btn_bottom + 4, FONT_SIZE - 4, Color(255, 255, 255, 255))
 
-			local hover_reset = point_in_box(mx, my, btn_x, btn_bottom, BTN_W, BTN_H)
-			ui.rect(gui, btn_x, btn_bottom, BTN_W, BTN_H,
-				hover_reset and Color(220, 90, 40, 40) or Color(200, 50, 25, 25), 860)
-			ui.text(gui, "Reset", btn_x + 18, btn_bottom + 4, FONT_SIZE - 4, Color(255, 255, 255, 255))
+		-- Optional second button (e.g. the L15 details toggle), to the right of Reset.
+		local extra = opts.extra_btn
+		local hover_extra = false
+		if extra then
+			local ex = btn_x + BTN_W + PAD * 2 + 6
+			hover_extra = point_in_box(mx, my, ex, btn_bottom, EXTRA_BTN_W, BTN_H)
+			ui.rect(gui, ex, btn_bottom, EXTRA_BTN_W, BTN_H,
+				hover_extra and Color(220, 40, 70, 40) or Color(200, 25, 45, 25), 860)
+			ui.text(gui, extra.label or "", ex + 10, btn_bottom + 4, FONT_SIZE - 4, Color(255, 255, 255, 255))
+		end
 
-			-- Optional second button (e.g. the L15 details toggle), to the right of Reset.
-			local extra = opts.extra_btn
-			local hover_extra = false
-			if extra then
-				local ex = btn_x + BTN_W + PAD * 2 + 6
-				hover_extra = point_in_box(mx, my, ex, btn_bottom, EXTRA_BTN_W, BTN_H)
-				ui.rect(gui, ex, btn_bottom, EXTRA_BTN_W, BTN_H,
-					hover_extra and Color(220, 40, 70, 40) or Color(200, 25, 45, 25), 860)
-				ui.text(gui, extra.label or "", ex + 10, btn_bottom + 4, FONT_SIZE - 4, Color(255, 255, 255, 255))
-			end
-
-			if pressed_edge and hover_reset then
-				if reset_fn then reset_fn()
-				elseif reset_all_fn then reset_all_fn() end
-			elseif pressed_edge and hover_extra then
-				if extra and extra.on_click then extra.on_click() end
-			end
+		if pressed_edge and hover_reset then
+			if reset_fn then reset_fn()
+			elseif reset_all_fn then reset_all_fn() end
+		elseif pressed_edge and hover_extra then
+			if extra and extra.on_click then extra.on_click() end
 		end
 
 		if mod._drag_key == drag_key then
@@ -258,12 +248,10 @@ function ui.frame(gui, panel_w, content_rows, pos_x_id, pos_y_id, default_x_frac
 		end
 	end
 
-	-- While collapsed, the title itself follows the same visibility rule as the
-	-- Hide/Show button: hidden during normal play, only drawn while the cursor
-	-- is active (chat/esc menu open) so a collapsed panel doesn't clutter the HUD.
-	local title_visible = not collapsed or cursor_active
-
-	return x, top, row_y, collapsed, title_visible
+	-- Returns kept 5-wide for backwards compatibility with existing callers that
+	-- unpack (x, top, row_y, collapsed, title_visible): panels are never collapsed
+	-- now (global hide skips drawing them entirely) and the title always shows.
+	return x, top, row_y, false, true
 end
 
 return ui

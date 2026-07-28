@@ -6,112 +6,47 @@ return {
 	is_togglable = true,
 	options = {
 		widgets = {
-			-- Temp Health group (level-5 talents) --------------------------------
+			-- Gameplay-affecting features. ONE master consent switch (default off:
+			-- the mod is measure-only out of the box) with a sub-toggle per
+			-- feature. Every forced/modifying code path gates on master AND sub
+			-- (mod._gameplay_on in modules/gameplay_control.lua); the control
+			-- panel lists whatever is live in-game.
 			{
-				setting_id = "show_thp",
+				setting_id = "allow_gameplay",
 				type = "checkbox",
-				title = "show_thp",
-				tooltip = "show_thp_tooltip",
-				default_value = true,
-				sub_widgets = {
-					{
-						setting_id = "show_tb",
-						type = "checkbox",
-						title = "show_tb",
-						tooltip = "show_tb_tooltip",
-						default_value = false,
-					},
-					{
-						setting_id = "show_decay_pct",
-						type = "checkbox",
-						title = "show_decay_pct",
-						tooltip = "show_decay_pct_tooltip",
-						default_value = false,
-					},
-					{
-						setting_id = "show_blocked",
-						type = "checkbox",
-						title = "show_blocked",
-						tooltip = "show_blocked_tooltip",
-						default_value = false,
-					},
-				},
-			},
-			-- Level-15 damage group ---------------------------------------------
-			{
-				setting_id = "show_level15",
-				type = "checkbox",
-				title = "show_level15",
-				tooltip = "show_level15_tooltip",
-				default_value = false,
-			},
-			-- Level-10 talent tier: a master category with one career-specific sub-
-			-- toggle each (the panel for a career shows only while playing it).
-			{
-				setting_id = "show_level10",
-				type = "checkbox",
-				title = "show_level10",
-				tooltip = "show_level10_tooltip",
+				title = "allow_gameplay",
+				tooltip = "allow_gameplay_tooltip",
 				default_value = false,
 				sub_widgets = {
 					{
-						setting_id = "show_level10_whc",
+						setting_id = "force_ep",
 						type = "checkbox",
-						title = "show_level10_whc",
-						tooltip = "show_level10_whc_tooltip",
+						title = "force_ep",
+						tooltip = "force_ep_tooltip",
 						default_value = true,
 					},
 					{
-						setting_id = "show_level10_merc",
+						setting_id = "force_flense",
 						type = "checkbox",
-						title = "show_level10_merc",
-						tooltip = "show_level10_merc_tooltip",
+						title = "force_flense",
+						tooltip = "force_flense_tooltip",
 						default_value = true,
 					},
-				},
-			},
-			-- Level-20 talent tier: master category with career-specific sub-toggles.
-			{
-				setting_id = "show_level20",
-				type = "checkbox",
-				title = "show_level20",
-				tooltip = "show_level20_tooltip",
-				default_value = false,
-				sub_widgets = {
 					{
-						setting_id = "show_level20_merc",
+						setting_id = "force_st_spread",
 						type = "checkbox",
-						title = "show_level20_merc",
-						tooltip = "show_level20_merc_tooltip",
+						title = "force_st_spread",
+						tooltip = "force_st_spread_tooltip",
 						default_value = true,
 					},
+					{
+						setting_id = "unequip_l15",
+						type = "checkbox",
+						title = "unequip_l15",
+						tooltip = "unequip_l15_tooltip",
+						default_value = false,
+					},
 				},
-			},
-			-- General power-boost cleave forcing (applies to every power-level
-			-- talent panel: Enhanced Power L15, Reikland Reaper L20). Top-level,
-			-- not nested, because it is shared across panels.
-			{
-				setting_id = "force_ep",
-				type = "checkbox",
-				title = "force_ep",
-				tooltip = "force_ep_tooltip",
-				default_value = false,
-			},
-			-- Crit rate tracker -----------------------------------------------------
-			{
-				setting_id = "show_crit_tracker",
-				type = "checkbox",
-				title = "show_crit_tracker",
-				tooltip = "show_crit_tracker_tooltip",
-				default_value = false,
-			},
-			-- Career-skill ult cooldown refund group ------------------------------
-			{
-				setting_id = "show_ult_refund",
-				type = "checkbox",
-				title = "show_ult_refund",
-				tooltip = "show_ult_refund_tooltip",
-				default_value = false,
 			},
 			-- Global --------------------------------------------------------------
 			{
@@ -130,6 +65,16 @@ return {
 				keybind_trigger = "pressed",
 				keybind_type = "function_call",
 				function_name = "reset",
+			},
+			{
+				setting_id = "hide_keybind",
+				type = "keybind",
+				title = "hide_keybind",
+				tooltip = "hide_keybind_tooltip",
+				default_value = {},
+				keybind_trigger = "pressed",
+				keybind_type = "function_call",
+				function_name = "toggle_hide",
 			},
 		},
 	},

@@ -100,8 +100,13 @@ local HELBORG_HIT_COUNT = 5
 -- Running totals (Helborg only; More the Merrier / Limb Splitter live on their
 -- power_boost instances).
 -- ---------------------------------------------------------------------------
-local helborg      -- Official variant { total_dmg, first_dmg, total_uncapped } (with crit suppression)
-local helborg_tb   -- TB variant (forced-crit gains only; no random-crit suppression)
+-- Helborg records are per-unit-category buckets; `helborg`/`helborg_tb` point at the
+-- active category's record during crediting and at a merged view during draw.
+local helborg      -- ACTIVE Official variant { total_dmg, first_dmg, total_uncapped }
+local helborg_tb   -- ACTIVE TB variant (forced-crit gains only)
+local helborg_cat     -- { es=, mon=, trash= } Official
+local helborg_tb_cat  -- { es=, mon=, trash= } TB
+local F            -- unit_filter (mod._filter), set in init
 local helborg_hits -- attack counter toward the next guaranteed crit
 local cur_attack   -- per-attack Helborg decision, set at first target, reused for cleaved targets
 
@@ -117,12 +122,25 @@ local function new_record()
 	return { total_dmg = 0, first_dmg = 0, total_uncapped = 0 }
 end
 
+local function fresh_cat()
+	return { es = new_record(), mon = new_record(), trash = new_record() }
+end
+
+-- Module-scope initialization so draw/credit never index a nil record before the
+-- first M.reset() (mission-entry reset).
+helborg_cat = fresh_cat()
+helborg_tb_cat = fresh_cat()
+helborg = helborg_cat.trash
+helborg_tb = helborg_tb_cat.trash
+
 function M.reset()
 	if mtm_boost then mtm_boost:reset() end
 	if ls_boost then ls_boost:reset() end
 	if l10m_kt then l10m_kt:reset() end
-	helborg = new_record()
-	helborg_tb = new_record()
+	helborg_cat = fresh_cat()
+	helborg_tb_cat = fresh_cat()
+	helborg = helborg_cat.trash
+	helborg_tb = helborg_tb_cat.trash
 	helborg_hits = 0
 	cur_attack = nil
 	ls_est_sum = 0
@@ -186,16 +204,9 @@ local function talent_equipped(unit, talent_name)
 	return ok and res or false
 end
 
--- Sub-toggle defaults to on when unset (the tiered settings default nil -> true).
-local function sub_on()
-	local v = mod:get("show_level10_merc")
-	if v == nil then return true end
-	return v
-end
-
--- Panel/simulation active only for Mercenary with the tier + sub toggle on.
+-- Panel/simulation active only while playing Mercenary.
 local function active()
-	return mod:get("show_level10") and sub_on() and career_is_merc()
+	return career_is_merc()
 end
 
 -- ---------------------------------------------------------------------------
@@ -270,6 +281,11 @@ end
 -- ctx = the calculate_damage context; final/health/first precomputed by on_hit.
 local function account_helborg(ctx, final, health, first)
 	if talent_equipped(ctx.attacker_unit, TALENT_HELBORG) then return end
+
+	-- Route Helborg crediting into the target's unit-category record.
+	local cat = ctx.cat or F.cat_of(ctx.target_unit)
+	helborg = helborg_cat[cat]
+	helborg_tb = helborg_tb_cat[cat]
 
 	-- The counter increments once per ATTACK (first target only). Decide at the first
 	-- target whether this whole attack is the guaranteed crit, then reuse that decision
@@ -393,6 +409,7 @@ end
 function M.init(owner_mod, ui_panel)
 	mod = owner_mod
 	ui = ui_panel
+	F = mod._filter
 
 	-- Shared power-boost engine (owned + hooked by level 15, shared via mod._power_boost).
 	PowerBoost = mod._power_boost
@@ -407,7 +424,7 @@ function M.init(owner_mod, ui_panel)
 		mult = mtm_mult,   -- resolved live per hit / sweep
 		talent_equipped = function (unit) return talent_equipped(unit, TALENT_MTM) end,
 		gate = active,
-		force_enabled = function () return mod:get("force_ep") end,  -- shared force-cleave button
+		force_enabled = function () return mod._gameplay_on("force_ep") end,  -- gameplay-gated force-cleave
 	}))
 
 	-- Limb Splitter: cleave-only +50% power boost. We never call its account_hit (no
@@ -416,7 +433,7 @@ function M.init(owner_mod, ui_panel)
 		mult = LS_CLEAVE_MULT,
 		talent_equipped = function (unit) return talent_equipped(unit, TALENT_LS) end,
 		gate = active,
-		force_enabled = function () return mod:get("force_ep") end,
+		force_enabled = function () return mod._gameplay_on("force_ep") end,
 		-- Pure cleave (no per-hit column), so it can measure its own real extra cleave
 		-- while equipped without double-counting.
 		measure_equipped = true,
@@ -448,10 +465,11 @@ end
 
 function M.log_state()
 	if not DBG then return end
+	local helborg = F.merge_sets(helborg_cat)
 	dlog("L10M SNAP mtm total/first (uncap)=%.1f/%.1f (%.1f) cleave +%d/+%.1f | ls cleave +%d/+%.1f | helborg %.1f/%.1f (%.1f)",
-		mtm_boost.total_dmg, mtm_boost.first_dmg, mtm_boost.total_uncapped,
-		mtm_boost.extra_units_hit or 0, mtm_boost.extra_cleave_dmg or 0,
-		ls_boost.extra_units_hit or 0, ls_boost.extra_cleave_dmg or 0,
+		mtm_boost:rd("total_dmg"), mtm_boost:rd("first_dmg"), mtm_boost:rd("total_uncapped"),
+		mtm_boost:units_hit(), mtm_boost:rd("extra_cleave_dmg"),
+		ls_boost:units_hit(), ls_boost:rd("extra_cleave_dmg"),
 		helborg.total_dmg, helborg.first_dmg, helborg.total_uncapped)
 end
 
@@ -463,6 +481,10 @@ end
 function M.draw(gui)
 	local FONT_SIZE = ui.FONT_SIZE
 	local small = FONT_SIZE - 6
+
+	-- Merge the Helborg category records the current filter selects.
+	local helborg = F.merge_sets(helborg_cat)
+	local helborg_tb = F.merge_sets(helborg_tb_cat)
 
 	-- rows: title(0) header(1) MtM(2) LimbSplitter(3) Helborg(4) cleave note(5) host note(6)
 	local x, top, row_y, collapsed, title_visible = ui.frame(gui, PANEL_W_T10M, 6, "l10m_pos_x", "l10m_pos_y", 0.20, 0.6, "l10m", M.reset_self)
@@ -504,9 +526,9 @@ function M.draw(gui)
 	end
 
 	-- More the Merrier: per-hit extra + its extra cleave damage (like Enhanced Power).
-	local mtm_total = mtm_boost.total_dmg + (mtm_boost.extra_cleave_dmg or 0)
-	local mtm_uncap = mtm_boost.total_uncapped + (mtm_boost.extra_cleave_uncapped or 0)
-	row(2, "More the Merrier", mtm_total, mtm_boost.first_dmg, mtm_uncap, false)
+	local mtm_total = mtm_boost:rd("total_dmg") + mtm_boost:rd("extra_cleave_dmg")
+	local mtm_uncap = mtm_boost:rd("total_uncapped") + mtm_boost:rd("extra_cleave_uncapped")
+	row(2, "More the Merrier", mtm_total, mtm_boost:rd("first_dmg"), mtm_uncap, false)
 	-- Real Total (kill-aware, per-hit only -- the extra-cleave slice has no kill model).
 	ui.text(gui, string.format("%.0f", kget("mtm").real_total), x + T10M_REAL_COL, row_y(2), FONT_SIZE, ui.white)
 
@@ -522,13 +544,13 @@ function M.draw(gui)
 		--     measured extra-cleave damage.
 		--   * NOT equipped + Force cleave OFF: extra units were only counted, so
 		--     estimate their damage as extra_units x the run's average cleave-hit damage.
-		local forced_cleave = mod:get("force_ep")
+		local forced_cleave = mod._gameplay_on("force_ep")
 		local ls_total, ls_uncap
 		if ls_equipped or forced_cleave then
-			ls_total = ls_boost.extra_cleave_dmg or 0
-			ls_uncap = ls_boost.extra_cleave_uncapped or 0
+			ls_total = ls_boost:rd("extra_cleave_dmg")
+			ls_uncap = ls_boost:rd("extra_cleave_uncapped")
 		else
-			local n = ls_boost.extra_units_hit or 0
+			local n = ls_boost:units_hit()
 			local avg = ls_est_count > 0 and (ls_est_sum / ls_est_count) or 0
 			local avg_u = ls_est_count > 0 and (ls_est_uncap_sum / ls_est_count) or 0
 			ls_total = n * avg
@@ -564,7 +586,7 @@ function M.draw(gui)
 
 	-- Cleave summary: extra units the higher cleave power reached (measured when the
 	-- Force cleave button is on, otherwise an estimate).
-	local forced = mod:get("force_ep")
+	local forced = mod._gameplay_on("force_ep")
 	local est = forced and "" or " (est)"
 	-- Limb Splitter is measured (not estimated) while equipped, too.
 	local ls_est = (forced or ls_equipped) and "" or " (est)"

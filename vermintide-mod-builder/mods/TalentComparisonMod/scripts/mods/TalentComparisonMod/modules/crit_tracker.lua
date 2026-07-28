@@ -21,6 +21,18 @@
 --             melee kind (melee is already counted via the sweep hook above, so it
 --             is excluded here to avoid double counting). Nothing else in this mod
 --             hooks is_critical_strike, so no VMF duplicate-hook conflict.
+--
+-- Also tracks HEADSHOT rate -- unlike crit rate this is HITS only (attacks that
+-- actually connected with an enemy), since a "headshot" isn't meaningful for a
+-- miss. Forwarded from the level-15 module's single DamageUtils.calculate_damage
+-- hook via mod._crit_on_hit(ctx) (ctx = every calculate_damage argument + the real
+-- final damage, already filtered to the local player's genuine hits). A hit is a
+-- headshot when hit_zone_name is "head" or "neck" -- the same weakspot check the
+-- level-15 stagger-number model and THP module use. DoT ticks (damage_profile.is_dot)
+-- are excluded (not attack rolls); melee hits are deduped via the shared
+-- mod._l15_melee_credit (dual-wield-safe) exactly like the L10/L20/crit-Hits
+-- forwards. Melee vs ranged uses damage_profile.charge_value (light_attack/
+-- heavy_attack = melee; anything else non-dot = ranged).
 -- ============================================================================
 
 local M = {}
@@ -31,13 +43,18 @@ local ui  -- shared ui_panel, set in init()
 local melee_total, melee_total_crits = 0, 0
 local ranged_total, ranged_total_crits = 0, 0
 
+local melee_hits, melee_headshots = 0, 0
+local ranged_hits, ranged_headshots = 0, 0
+
 function M.reset()
 	melee_total, melee_total_crits = 0, 0
 	ranged_total, ranged_total_crits = 0, 0
+	melee_hits, melee_headshots = 0, 0
+	ranged_hits, ranged_headshots = 0, 0
 end
 
 local function active()
-	return mod:get("show_crit_tracker")
+	return true
 end
 
 local function local_player_unit()
@@ -73,6 +90,30 @@ local function account_ranged_roll(unit, action, is_crit)
 	if is_crit then ranged_total_crits = ranged_total_crits + 1 end
 end
 
+-- One genuine local-player HIT (attack that connected), forwarded from the
+-- level-15 module's calculate_damage hook. Headshot rate is hits-only.
+local function account_hit_headshot(ctx)
+	local damage_profile = ctx.damage_profile
+	if not damage_profile or damage_profile.is_dot then return end
+
+	local is_melee = damage_profile.charge_value == "light_attack"
+		or damage_profile.charge_value == "heavy_attack"
+
+	-- Melee dedupe: calculate_damage fires 2-3x per real melee hit; share the
+	-- level-15 module's decision so this agrees with every other forward.
+	if is_melee and mod._l15_melee_credit and not mod._l15_melee_credit(ctx) then return end
+
+	local weakspot = ctx.hit_zone_name == "head" or ctx.hit_zone_name == "neck"
+
+	if is_melee then
+		melee_hits = melee_hits + 1
+		if weakspot then melee_headshots = melee_headshots + 1 end
+	else
+		ranged_hits = ranged_hits + 1
+		if weakspot then ranged_headshots = ranged_headshots + 1 end
+	end
+end
+
 function M.wants_display()
 	return active()
 end
@@ -95,7 +136,7 @@ function M.draw(gui)
 	local FONT_SIZE = ui.FONT_SIZE
 
 	local x, top, row_y, collapsed, title_visible =
-		ui.frame(gui, PANEL_W, 2, "crit_pos_x", "crit_pos_y", 0.03, 0.84, "crit", M.reset)
+		ui.frame(gui, PANEL_W, 6, "crit_pos_x", "crit_pos_y", 0.03, 0.84, "crit", M.reset)
 	if not x then return end
 
 	if title_visible then
@@ -108,6 +149,14 @@ function M.draw(gui)
 
 	ui.text(gui, "Ranged", x, row_y(2), FONT_SIZE, ui.white)
 	ui.text(gui, fmt_rate(ranged_total_crits, ranged_total), x + VAL_COL, row_y(2), FONT_SIZE, ui.white)
+
+	ui.text_bold(gui, "Headshot Rate:", x, row_y(3), FONT_SIZE, ui.yellow)
+
+	ui.text(gui, "Melee", x, row_y(4), FONT_SIZE, ui.white)
+	ui.text(gui, fmt_rate(melee_headshots, melee_hits), x + VAL_COL, row_y(4), FONT_SIZE, ui.white)
+
+	ui.text(gui, "Ranged", x, row_y(5), FONT_SIZE, ui.white)
+	ui.text(gui, fmt_rate(ranged_headshots, ranged_hits), x + VAL_COL, row_y(5), FONT_SIZE, ui.white)
 end
 
 function M.init(owner_mod, ui_panel)
@@ -118,6 +167,12 @@ function M.init(owner_mod, ui_panel)
 	-- client_owner_start_action hook (same duplicate-hook reason).
 	mod._crit_on_melee_swing = function (sweep_self)
 		pcall(account_melee_swing, sweep_self)
+	end
+
+	-- Headshot rate: forwarded from the level-15 module's calculate_damage hook
+	-- (already filtered to the local player's genuine hits; see account_hit_headshot).
+	mod._crit_on_hit = function (ctx)
+		pcall(account_hit_headshot, ctx)
 	end
 
 	-- Ranged: hook the single shared crit-roll site every ranged action funnels

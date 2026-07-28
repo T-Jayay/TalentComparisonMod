@@ -33,18 +33,26 @@ end
 -- ---------------------------------------------------------------------------
 -- Running totals
 -- ---------------------------------------------------------------------------
-local totals = {
-	-- live values
-	sting = 0,
-	carve = 0,
-	execute = 0,
-	second_wind = 0,
-	-- Tourney Balance values
-	tb_regrowth = 0,   -- <- sting        (rebaltourn_heal_finesse: crit 1.5 / hs 3)
-	tb_reaper = 0,     -- <- carve        (flat 1, targets 1-5 only)
-	tb_bloodlust = 0,  -- <- execute      (TB-overridden breed.bloodlust_health)
-	tb_vanguard = 0,   -- <- second_wind  (raw stagger x1, no kill credit)
-}
+-- The THP generated per talent, partitioned by the gaining hit/kill's unit category
+-- (es / mon / trash) so the panel's Live/TB columns filter with the control panel.
+-- `totals` points at the active category during a gain event and at a merged view in
+-- draw. (The Decay / Dec % / Blocked columns model per-talent pools and are NOT
+-- category-split -- they stay aggregate; documented on the decay table below.)
+local function fresh_totals()
+	return {
+		-- live values
+		sting = 0, carve = 0, execute = 0, second_wind = 0,
+		-- Tourney Balance values
+		tb_regrowth = 0,   -- <- sting        (rebaltourn_heal_finesse: crit 1.5 / hs 3)
+		tb_reaper = 0,     -- <- carve        (flat 1, targets 1-5 only)
+		tb_bloodlust = 0,  -- <- execute      (TB-overridden breed.bloodlust_health)
+		tb_vanguard = 0,   -- <- second_wind  (raw stagger x1, no kill credit)
+	}
+end
+
+local F   -- unit_filter (mod._filter), set in init
+local totals_cat = { es = fresh_totals(), mon = fresh_totals(), trash = fresh_totals() }
+local totals = totals_cat.trash
 
 -- Per-swing latch for Regrowth (TB Sting): the finesse heal fires only on the
 -- first crit/headshot hit of a swing (`has_procced`), reset when target_index 1
@@ -134,14 +142,8 @@ local function register_gain(key, amount)
 end
 
 function M.reset()
-	totals.sting = 0
-	totals.carve = 0
-	totals.execute = 0
-	totals.second_wind = 0
-	totals.tb_regrowth = 0
-	totals.tb_reaper = 0
-	totals.tb_bloodlust = 0
-	totals.tb_vanguard = 0
+	totals_cat = { es = fresh_totals(), mon = fresh_totals(), trash = fresh_totals() }
+	totals = totals_cat.trash
 	for _, d in pairs(decay) do
 		d.timer = math.huge
 		d.first_t = nil
@@ -617,6 +619,7 @@ end
 function M.init(owner_mod, ui_panel)
 	mod = owner_mod
 	ui = ui_panel
+	F = mod._filter
 
 	-- Buff-proc event hook: fires for every proc on every unit; filter to ours.
 	mod:hook_safe(BuffExtension, "trigger_procs", function (self, event, ...)
@@ -627,6 +630,7 @@ function M.init(owner_mod, ui_panel)
 		local params = { ... }
 
 		if event == "on_hit" then
+			totals = totals_cat[F.cat_of(params[1])]
 			local sting = sting_amount(params)
 			local regrowth = regrowth_amount(params)
 			totals.sting = totals.sting + sting
@@ -639,6 +643,7 @@ function M.init(owner_mod, ui_panel)
 					tostring(params[4]), tostring(params[6]), sting, regrowth)
 			end
 		elseif event == "on_player_damage_dealt" then
+			totals = totals_cat[F.cat_of(params[1])]
 			local carve = carve_amount(params)
 			totals.carve = totals.carve + carve
 			totals.tb_reaper = totals.tb_reaper + reaper_amount(params)
@@ -650,6 +655,7 @@ function M.init(owner_mod, ui_panel)
 		elseif event == "on_stagger" then
 			-- Only fires for staggers on units that survived the hit (the game skips
 			-- this proc for killing blows). Both live and TB count these.
+			totals = totals_cat[F.cat_of(params[1])]
 			local stagger = second_wind_stagger_amount(params)
 			totals.second_wind = totals.second_wind + stagger
 			local corpse = target_is_corpse(params[1])
@@ -661,6 +667,8 @@ function M.init(owner_mod, ui_panel)
 				tostring(params[4]), tostring(params[6]), tostring(params[8]),
 				tostring(params[2] and params[2].is_push), tostring(corpse), stagger)
 		elseif event == "on_kill" then
+			-- Prefer the killed breed (params[2]); fall back to the killed unit (params[3]).
+			totals = totals_cat[params[2] and F.cat_of_breed(params[2]) or F.cat_of(params[3])]
 			local execute = execute_amount(params)
 			local bloodlust = bloodlust_amount(params)
 			totals.execute = totals.execute + execute
@@ -893,7 +901,7 @@ local COL0        = 160  -- x of the first data column (relative to panel x)
 local COL_STEP    = 90   -- spacing between data columns
 
 function M.wants_display()
-	return mod:get("show_thp")
+	return true
 end
 
 -- Fraction of time (0-100) this talent's pool would be actively decaying,
@@ -910,6 +918,7 @@ end
 -- totals are cleared (Reset button, keybind, and mission-entry reset).
 function M.log_state()
 	if not DBG then return end
+	local totals = F.merge_sets(totals_cat)
 	dlog("THP SNAP live: sting=%.2f carve=%.2f exec=%.2f sw=%.2f | tb: regrowth=%.2f reaper=%.2f bloodlust=%.2f vanguard=%.2f",
 		totals.sting, totals.carve, totals.execute, totals.second_wind,
 		totals.tb_regrowth, totals.tb_reaper, totals.tb_bloodlust, totals.tb_vanguard)
@@ -931,9 +940,12 @@ local function fmt_pct(v) return string.format("%.0f%%", v) end
 
 function M.draw(gui)
 	local FONT_SIZE = ui.FONT_SIZE
-	local tb_on = mod:get("show_tb")
-	local pct_on = mod:get("show_decay_pct")
-	local blocked_on = mod:get("show_blocked")
+	-- Merge the category totals the current filter selects (Live/TB columns filter;
+	-- Decay/Dec %/Blocked stay aggregate).
+	local totals = F.merge_sets(totals_cat)
+	local tb_on = true
+	local pct_on = true
+	local blocked_on = true
 
 	local sting_carve_pct = decay_pct(sting_carve_cadence)
 

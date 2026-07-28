@@ -59,6 +59,7 @@ local M = {}
 
 local mod   -- set in init()
 local ui    -- shared ui_panel, set in init()
+local F     -- unit_filter (mod._filter), set in init
 local AttackSpeedSim  -- required in init()
 local PowerBoost      -- shared power_boost module (from level 15, via mod._power_boost)
 local reaper_boost    -- Reikland Reaper's power_boost instance (mult 0.15, gated on PS)
@@ -218,13 +219,9 @@ local function career_is_merc()
 	return ok and name == MERC_CAREER_NAME
 end
 
--- Panel/simulation active only for Mercenary with the tier + career sub-toggle on.
--- show_level20 is the "Level 20 Talents" tier master; show_level20_merc is the
--- Mercenary-specific sub-toggle (nil -> on by default).
+-- Panel/simulation active only while playing Mercenary.
 local function active()
-	local sub = mod:get("show_level20_merc")
-	if sub == nil then sub = true end
-	return mod:get("show_level20") and sub and career_is_merc()
+	return career_is_merc()
 end
 
 local function talent_equipped(unit, talent_name)
@@ -249,35 +246,6 @@ local function unit_alive(unit)
 	return h ~= nil and h > 0
 end
 
--- Player/bot units on the local player's side, excluding the local player.
-local function ally_units()
-	local owner = local_player_unit()
-	if not owner then return {} end
-	local ok, side = pcall(function () return Managers.state.side.side_by_unit[owner] end)
-	if not ok or not side then return {} end
-	local units = side.PLAYER_AND_BOT_UNITS or {}
-	local out = {}
-	for i = 1, #units do
-		if units[i] ~= owner then out[#out + 1] = units[i] end
-	end
-	return out
-end
-
--- Does this unit currently carry the spread Paced-Strikes attack-speed buff? The
--- proc sub-buff has no `name`, so `buff_type` is nil and has_buff_type won't match;
--- match on buff_template_name instead (set for every active buff, buff_extension.lua).
-local function unit_has_ps(unit)
-	local be = ScriptUnit.has_extension(unit, "buff_system")
-	if not be then return false end
-	local ok, res = pcall(function ()
-		local buffs = be._buffs
-		for i = 1, be._num_buffs do
-			if buffs[i].buff_template_name == PS_PROC_BUFF then return true end
-		end
-		return false
-	end)
-	return ok and res or false
-end
 
 -- Readable label for the per-ally detail lines; best-effort, falls back to "ally".
 local function unit_name(unit)
@@ -319,30 +287,13 @@ local function finalize_swing()
 	-- local ST extra and the ally sims under TB. Harmless in vanilla mode (unused).
 	feed_track(st_track, swing)
 
-	-- Strike Together (vanilla forced spread): the talent has buffs={} and the game
-	-- gates its spread on has_talent (buff_templates.lua gain_markus_mercenary_passive_
-	-- proc), so we can't force it by adding a buff to the owner -- we replicate the
-	-- group branch ourselves. On a real >=3-target melee proc, grant every living ally
-	-- the +10% attack-speed buff for 6s. Skipped when Strike Together IS equipped (the
-	-- game already spreads it). Host only.
-	-- NOT done under TB: there the base passive ALREADY spreads to allies, and the
-	-- ally value is measured off the Merc's own proc timeline (base_track/st_track
-	-- expiries), so forcing a real buff would double-apply and change gameplay.
-	local owner = local_player_unit()
-	if owner and not tb_mod_active() and is_server() and swing.targets >= BASE_PS_TARGETS
-		and not talent_equipped(owner, TALENT_ST) then
-		local bs = Managers.state.entity and Managers.state.entity:system("buff_system")
-		if bs then
-			for _, u in ipairs(ally_units()) do
-				if unit_alive(u) then
-					pcall(function () bs:add_buff(u, PS_PROC_BUFF, owner, false) end)
-				end
-			end
-		end
-	end
+	-- Strike Together is NEVER forced onto allies now (vanilla or TB). The ally value
+	-- is always an ESTIMATE off the Merc's own >=3 proc windows (base_track): we observe
+	-- each ally's own un-sped swings and ghost-sim how much extra damage the +10%
+	-- attack speed WOULD have given them during those windows. See finalize_ally_swing.
 
 	dlog("SWING t=%.2f targets=%d dmg=%.1f | basePS m=%s ET m=%s",
-		swing.t, swing.targets, swing.dmg,
+		swing.t, swing.targets, (swing.dmg.es + swing.dmg.mon + swing.dmg.trash),
 		(base_track.expiry and swing.t < base_track.expiry) and "on" or "off",
 		(et_track.expiry and swing.t < et_track.expiry) and "on" or "off")
 end
@@ -357,7 +308,7 @@ local function on_swing_start(self, power_level)
 	if not is_melee(dp) then return end
 	-- The previous swing is complete once the next one begins.
 	finalize_swing()
-	cur_swing = { dmg = 0, targets = 0, t = game_time(), seen = {} }
+	cur_swing = { dmg = { es = 0, mon = 0, trash = 0 }, targets = 0, t = game_time(), seen = {} }
 end
 
 -- ---------------------------------------------------------------------------
@@ -405,7 +356,7 @@ local function on_hit(ctx)
 			return   -- duplicate/deduped call for a hit already counted this swing.
 		end
 		if not swing then
-			swing = { dmg = 0, targets = 0, t = now, seen = {} }
+			swing = { dmg = { es = 0, mon = 0, trash = 0 }, targets = 0, t = now, seen = {} }
 			cur_swing = swing
 		end
 	end
@@ -419,9 +370,11 @@ local function on_hit(ctx)
 		return
 	end
 
-	-- Accumulate this swing's real damage for the attack-speed sim (Enhanced Training).
+	-- Accumulate this swing's real damage for the attack-speed sim (Enhanced Training),
+	-- split by the unit category it landed on so ghost swings can be valued per category.
 	if melee then
-		swing.dmg = swing.dmg + final
+		local cat = ctx.cat or F.cat_of(target_unit)
+		swing.dmg[cat] = (swing.dmg[cat] or 0) + final
 		local idx = ctx.target_index or 1
 		if idx > swing.targets then swing.targets = idx end
 	end
@@ -462,11 +415,13 @@ local function finalize_ally_swing(tr)
 		tr.base_sim:add_swing(tr.dmg, tr.base_active and (1.0 + ST_SPEED) or 1.0)
 		tr.st_sim:add_swing(tr.dmg, tr.st_active and (1.0 + ST_SPEED) or 1.0)
 	else
-		-- Vanilla down-sample: we observe the ally's already-sped-up swings, so feed
-		-- m=1/1.1 for swings landed while they carried PS; real - ghost = damage the
-		-- spread bought.
-		local m = tr.active and (1.0 / (1.0 + ST_SPEED)) or 1.0
-		tr.sim:add_swing(tr.dmg, m)
+		-- Vanilla estimate: the spread is NOT forced, so we observe the ally's OWN
+		-- un-sped swings. Estimate how much extra damage the +10% attack speed WOULD
+		-- have given them during the Merc's own >=3-target Paced-Strikes proc windows
+		-- (base_track) -- the windows in which Strike Together would have spread the
+		-- buff to this ally. Feed a ghost sim +10% while base_active; ghost - real =
+		-- base_sim:extra() = the extra damage the spread would have bought.
+		tr.base_sim:add_swing(tr.dmg, tr.base_active and (1.0 + ST_SPEED) or 1.0)
 	end
 end
 
@@ -483,10 +438,9 @@ local function on_ally_hit(ctx)
 	local tr = ally_tracks[unit]
 	if not tr then
 		tr = {
-			sim = AttackSpeedSim.new(),        -- vanilla down-sample sim
-			base_sim = AttackSpeedSim.new(),   -- TB: Merc >=3 proc timeline
+			base_sim = AttackSpeedSim.new(),   -- vanilla + TB: Merc >=3 proc timeline
 			st_sim = AttackSpeedSim.new(),     -- TB: Merc >=1 proc timeline
-			dmg = 0, last_t = nil, open = false, seen = {},
+			dmg = { es = 0, mon = 0, trash = 0 }, last_t = nil, open = false, seen = {},
 		}
 		ally_tracks[unit] = tr
 	end
@@ -496,10 +450,9 @@ local function on_ally_hit(ctx)
 	end
 	if not tr.open then
 		tr.open = true
-		tr.dmg = 0
+		tr.dmg = { es = 0, mon = 0, trash = 0 }
 		tr.seen = {}
-		tr.active = unit_has_ps(unit)                         -- vanilla: captured at swing start
-		tr.base_active = base_track.expiry ~= nil and now < base_track.expiry  -- TB: Merc >=3 window
+		tr.base_active = base_track.expiry ~= nil and now < base_track.expiry  -- Merc >=3 window
 		tr.st_active   = st_track.expiry ~= nil and now < st_track.expiry      -- TB: Merc >=1 window
 	end
 	-- Per-target dedupe (calculate_damage runs 2+ times per real hit).
@@ -507,7 +460,8 @@ local function on_ally_hit(ctx)
 	if seen_t and (now - seen_t) < SWEEP_DEDUPE_WINDOW then return end
 	tr.seen[ctx.target_unit] = now
 
-	tr.dmg = tr.dmg + final
+	local cat = ctx.cat or F.cat_of(ctx.target_unit)
+	tr.dmg[cat] = (tr.dmg[cat] or 0) + final
 	tr.last_t = now
 end
 
@@ -517,13 +471,13 @@ local function ally_extra(tr)
 		-- ST timeline vs base timeline: damage from the extra single-enemy proc windows.
 		return tr.st_sim:extra() - tr.base_sim:extra()
 	end
-	-- Vanilla down-sample: real - ghost.
-	return tr.sim.real_dmg - tr.sim.ghost_dmg
+	-- Vanilla estimate: extra damage the +10% spread would give during Merc >=3 windows.
+	return tr.base_sim:extra()
 end
 
 local function ally_swung(tr)
 	if tb_mod_active() then return tr.st_sim.real_swings > 0 end
-	return tr.sim.real_swings > 0
+	return tr.base_sim.real_swings > 0
 end
 
 -- Sum of the extra damage Strike Together bought all allies this run. Under TB the
@@ -559,7 +513,10 @@ end
 function M.init(owner_mod, ui_panel)
 	mod = owner_mod
 	ui = ui_panel
+	F = mod._filter
 	AttackSpeedSim = mod:dofile("scripts/mods/TalentComparisonMod/modules/attack_speed_sim")
+	-- Ghost swings value only the selected unit category's hits.
+	AttackSpeedSim.set_filter(function () return F.get_filter() end)
 
 	-- Reikland Reaper reuses Enhanced Power's power_boost engine (same damage /
 	-- source / cleave logic) with its own +15% power and its Paced-Strikes gate.
@@ -575,7 +532,7 @@ function M.init(owner_mod, ui_panel)
 		mult = REAPER_POWER,
 		talent_equipped = function (unit) return talent_equipped(unit, TALENT_REAPER) end,
 		gate = reaper_gate,
-		force_enabled = function () return mod:get("force_ep") end,  -- shared force-cleave button
+		force_enabled = function () return mod._gameplay_on("force_ep") end,  -- gameplay-gated force-cleave
 	}))
 	M.reset()
 
@@ -589,6 +546,11 @@ end
 -- Update: integrate uptime and flush a swing after an idle gap.
 -- ---------------------------------------------------------------------------
 function M.update(dt)
+	-- Strike Together is no longer force-spread onto allies -- its value is always an
+	-- estimate off the Merc's own proc windows -- so this panel never modifies gameplay.
+	if mod._gameplay_live then
+		mod._gameplay_live.force_st_spread = false
+	end
 	if not active() then return end
 	local now = game_time()
 
@@ -667,12 +629,12 @@ end
 
 function M.log_state()
 	if not DBG then return end
-	dlog("L20 SNAP ET extra=%.1f (ghost %.1f / real %.1f) | basePS up=%.1f%% ET up=%.1f%% | reaper %.1f (%.1f) | cleave +%d units +%.1f dmg | src m=%.1f r=%.1f o=%.1f",
-		et_track.sim:extra() - base_track.sim:extra(), et_track.sim.ghost_dmg, et_track.sim.real_dmg,
+	dlog("L20 SNAP ET extra=%.1f | basePS up=%.1f%% ET up=%.1f%% | reaper %.1f (%.1f) | cleave +%d units +%.1f dmg | src m=%.1f r=%.1f o=%.1f",
+		et_track.sim:extra() - base_track.sim:extra(),
 		uptime_pct(base_track), uptime_pct(et_track),
-		reaper_boost.total_dmg, reaper_boost.total_uncapped,
-		reaper_boost.extra_units_hit or 0, reaper_boost.extra_cleave_dmg or 0,
-		reaper_boost.src_melee or 0, reaper_boost.src_ranged or 0, reaper_boost.src_other or 0)
+		reaper_boost:rd("total_dmg"), reaper_boost:rd("total_uncapped"),
+		reaper_boost:units_hit(), reaper_boost:rd("extra_cleave_dmg"),
+		reaper_boost:rd("src_melee"), reaper_boost:rd("src_ranged"), reaper_boost:rd("src_other"))
 	dlog("L20 SNAP ST total=%.1f allies=%d", st_total(), #st_ally_lines())
 end
 
@@ -726,8 +688,8 @@ local function draw_vanilla(gui)
 	ui.text(gui, "Uncapped", x + L20_UNCAP_COL, row_y(1 + off), small, ui.grey)
 	ui.text(gui, "Real Total", x + L20_REAL_COL, row_y(1 + off), small, ui.grey)
 
-	local r_total = reaper_boost.total_dmg + (reaper_boost.extra_cleave_dmg or 0)
-	local r_uncap = reaper_boost.total_uncapped + (reaper_boost.extra_cleave_uncapped or 0)
+	local r_total = reaper_boost:rd("total_dmg") + reaper_boost:rd("extra_cleave_dmg")
+	local r_uncap = reaper_boost:rd("total_uncapped") + reaper_boost:rd("extra_cleave_uncapped")
 	ui.text(gui, "Reikland Reaper", x, row_y(2 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", r_total), x + L20_TOTAL_COL, row_y(2 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", r_uncap), x + L20_UNCAP_COL, row_y(2 + off), FONT_SIZE, ui.white)
@@ -742,11 +704,19 @@ local function draw_vanilla(gui)
 	-- Ghost-swing attack-speed estimate: no per-hit kill model, so no Real Total.
 	ui.text(gui, "-", x + L20_REAL_COL, row_y(3 + off), FONT_SIZE, ui.white)
 
-	-- Strike Together: extra ally damage from the spread +10% attack speed (forced on
-	-- allies while active; measured against their own down-sampled swing streams).
-	ui.text(gui, "Strike Together", x, row_y(4 + off), FONT_SIZE, ui.white)
-	ui.text(gui, string.format("%.0f", st_total()), x + L20_TOTAL_COL, row_y(4 + off), FONT_SIZE, ui.white)
-	ui.text(gui, "ESTIMATION", x + L20_UNCAP_COL, row_y(4 + off), small, ui.grey)
+	-- Strike Together: extra ally damage from the spread +10% attack speed. The spread
+	-- is never forced -- this is an ESTIMATE of how much extra damage the +10% would
+	-- have given allies during the Merc's own >=3-target Paced-Strikes proc windows,
+	-- measured against each ally's own un-sped swing stream (host only). When ST is
+	-- ALREADY equipped the game is already spreading it, so we don't estimate -- the
+	-- ally swings we observe are already sped up and the counterfactual is meaningless.
+	local owner = local_player_unit()
+	local st_equipped = owner and talent_equipped(owner, TALENT_ST)
+	ui.text(gui, st_equipped and "Strike Together (equipped)" or "Strike Together",
+		x, row_y(4 + off), FONT_SIZE, ui.white)
+	ui.text(gui, st_equipped and "-" or string.format("%.0f", st_total()),
+		x + L20_TOTAL_COL, row_y(4 + off), FONT_SIZE, ui.white)
+	ui.text(gui, st_equipped and "-" or "ESTIMATION", x + L20_UNCAP_COL, row_y(4 + off), small, ui.grey)
 	ui.text(gui, "-", x + L20_REAL_COL, row_y(4 + off), FONT_SIZE, ui.white)
 
 	-- Uptime comparison: base Paced Strikes vs Enhanced Training's harder proc.
@@ -758,23 +728,26 @@ local function draw_vanilla(gui)
 	-- Reikland Reaper extra damage by source (overkill-accounted; sums to Reaper
 	-- Total minus the extra-cleave slice below), mirroring the EP sources line.
 	ui.text(gui, string.format("Reaper sources: Melee +%.0f  Ranged +%.0f  Other +%.0f dmg",
-		reaper_boost.src_melee or 0, reaper_boost.src_ranged or 0, reaper_boost.src_other or 0),
+		reaper_boost:rd("src_melee"), reaper_boost:rd("src_ranged"), reaper_boost:rd("src_other")),
 		x, row_y(6 + off), small, ui.grey)
 
 	-- Reikland Reaper extra-cleave summary (forced via the shared force button, or
 	-- estimated), mirroring the EP cleave line.
 	local r_line
-	if mod:get("force_ep") then
+	if mod._gameplay_on("force_ep") then
 		r_line = string.format("Reaper cleave: +%d units, +%.0f dmg  (without +cleave: %.0f)",
-			reaper_boost.extra_units_hit, reaper_boost.extra_cleave_dmg, reaper_boost.total_dmg)
+			reaper_boost:units_hit(), reaper_boost:rd("extra_cleave_dmg"), reaper_boost:rd("total_dmg"))
 	else
 		r_line = string.format("Reaper cleave (est): +%d units  (without +cleave: %.0f)",
-			reaper_boost.extra_units_hit, reaper_boost.total_dmg)
+			reaper_boost:units_hit(), reaper_boost:rd("total_dmg"))
 	end
 	ui.text(gui, r_line, x, row_y(7 + off), small, ui.grey)
 
 	-- Strike Together per-ally breakdown (extra damage from each ally's spread +10%).
-	if #ally_lines == 0 then
+	if st_equipped then
+		ui.text(gui, "Strike Together: equipped -- game already spreads it, no estimate.",
+			x, row_y(8 + off), small, ui.grey)
+	elseif #ally_lines == 0 then
 		ui.text(gui, "Strike Together: no ally hits recorded yet (host only).",
 			x, row_y(8 + off), small, ui.grey)
 	else
@@ -836,8 +809,8 @@ local function draw_tb(gui)
 	ui.text(gui, "Uncapped", x + L20_UNCAP_COL, row_y(1 + off), small, ui.grey)
 	ui.text(gui, "Real Total", x + L20_REAL_COL, row_y(1 + off), small, ui.grey)
 
-	local r_total = reaper_boost.total_dmg + (reaper_boost.extra_cleave_dmg or 0)
-	local r_uncap = reaper_boost.total_uncapped + (reaper_boost.extra_cleave_uncapped or 0)
+	local r_total = reaper_boost:rd("total_dmg") + reaper_boost:rd("extra_cleave_dmg")
+	local r_uncap = reaper_boost:rd("total_uncapped") + reaper_boost:rd("extra_cleave_uncapped")
 	ui.text(gui, "Reikland Reaper", x, row_y(2 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", r_total), x + L20_TOTAL_COL, row_y(2 + off), FONT_SIZE, ui.white)
 	ui.text(gui, string.format("%.0f", r_uncap), x + L20_UNCAP_COL, row_y(2 + off), FONT_SIZE, ui.white)
@@ -863,16 +836,16 @@ local function draw_tb(gui)
 	if not show_extra then return end
 
 	ui.text(gui, string.format("Reaper sources: Melee +%.0f  Ranged +%.0f  Other +%.0f dmg",
-		reaper_boost.src_melee or 0, reaper_boost.src_ranged or 0, reaper_boost.src_other or 0),
+		reaper_boost:rd("src_melee"), reaper_boost:rd("src_ranged"), reaper_boost:rd("src_other")),
 		x, row_y(6 + off), small, ui.grey)
 
 	local r_line
-	if mod:get("force_ep") then
+	if mod._gameplay_on("force_ep") then
 		r_line = string.format("Reaper cleave: +%d units, +%.0f dmg  (without +cleave: %.0f)",
-			reaper_boost.extra_units_hit, reaper_boost.extra_cleave_dmg, reaper_boost.total_dmg)
+			reaper_boost:units_hit(), reaper_boost:rd("extra_cleave_dmg"), reaper_boost:rd("total_dmg"))
 	else
 		r_line = string.format("Reaper cleave (est): +%d units  (without +cleave: %.0f)",
-			reaper_boost.extra_units_hit, reaper_boost.total_dmg)
+			reaper_boost:units_hit(), reaper_boost:rd("total_dmg"))
 	end
 	ui.text(gui, r_line, x, row_y(7 + off), small, ui.grey)
 

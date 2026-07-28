@@ -102,7 +102,9 @@ local TALENT10_NAMES = {
 -- ---------------------------------------------------------------------------
 -- Running totals
 -- ---------------------------------------------------------------------------
-local totals
+local totals       -- ACTIVE record set: points at totals_cat[cat] per hit / merged in draw.
+local totals_cat   -- { es=, mon=, trash= }
+local F            -- unit_filter (mod._filter), set in init
 
 local function new_record()
 	return { total_dmg = 0, first_dmg = 0, total_uncapped = 0 }
@@ -116,7 +118,12 @@ local function fresh_totals()
 	return t
 end
 
-totals = fresh_totals()
+local function fresh_totals_cat()
+	return { es = fresh_totals(), mon = fresh_totals(), trash = fresh_totals() }
+end
+
+totals_cat = fresh_totals_cat()
+totals = totals_cat.trash
 
 -- Riposte window (game-time expiry of the guaranteed crit) and per-target melee dedupe.
 local riposte_window = nil
@@ -132,7 +139,8 @@ local dk_recompute_delta = 0
 local flense_forced_unit = nil
 
 function M.reset()
-	totals = fresh_totals()
+	totals_cat = fresh_totals_cat()
+	totals = totals_cat.trash
 	if l10_kt then l10_kt:reset() end
 	riposte_window = nil
 	table.clear(sweep_seen)
@@ -193,13 +201,9 @@ local function career_is_whc()
 	return ok and name == WHC_CAREER_NAME
 end
 
--- Panel/simulation active only for WHC with the tier + career sub-toggle on.
--- show_level10 is the "Level 10 Talents" tier master; show_level10_whc is the
--- WHC-specific sub-toggle (nil -> on by default).
+-- Panel/simulation active only while playing WHC.
 local function active()
-	local sub = mod:get("show_level10_whc")
-	if sub == nil then sub = true end
-	return mod:get("show_level10") and sub and career_is_whc()
+	return career_is_whc()
 end
 
 local function talent_equipped(unit, talent_name)
@@ -237,6 +241,31 @@ local function maintain_forced_flense()
 		buff_system:add_buff(unit, TALENT_FLENSE, unit)
 	end)
 	dlog("Forced Flense buff added=%s", tostring(ok))
+end
+
+-- Undo a forced grant when the gameplay gate turns off mid-life: find the buff we
+-- added on the local player (by buff_type; never present unless granted or equipped
+-- -- and we never grant while equipped) and remove it. If the type scan misses
+-- (template preprocessing quirk) the buff simply lasts until the next respawn.
+local function remove_forced_flense()
+	local unit = flense_forced_unit
+	flense_forced_unit = nil
+	if not unit or not Unit.alive(unit) then return end
+	if talent_equipped(unit, TALENT_FLENSE) then return end
+	local buff_ext = ScriptUnit.has_extension(unit, "buff_system")
+	if not buff_ext then return end
+	pcall(function ()
+		local buffs = buff_ext._buffs
+		for i = 1, buff_ext._num_buffs do
+			local buff = buffs[i]
+			if buff and (buff.buff_type == TALENT_FLENSE
+				or (buff.template and buff.template.name == TALENT_FLENSE)) then
+				buff_ext:remove_buff(buff.id)
+				dlog("Forced Flense buff removed (gate off)")
+				return
+			end
+		end
+	end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -296,6 +325,8 @@ local function on_hit(ctx)
 		if l10_kt then l10_kt:forget(target_unit) end
 		return
 	end
+	-- Route this hit's crediting into the target's unit-category record set.
+	totals = totals_cat[ctx.cat or F.cat_of(target_unit)]
 	local first = (ctx.target_index or 1) <= 1
 
 	-- --- Flense: bleed DoT ticks. On WHC the "bleed" profile only comes from the
@@ -373,6 +404,7 @@ end
 function M.init(owner_mod, ui_panel)
 	mod = owner_mod
 	ui = ui_panel
+	F = mod._filter
 
 	-- Shared kill / Real-Total tracker (owned by level15, which inits first). This panel
 	-- gets its own instance so its Reset zeroes only its rows; Deathknell/Riposte feed it.
@@ -409,13 +441,21 @@ function M.init(owner_mod, ui_panel)
 end
 
 -- ---------------------------------------------------------------------------
--- Update: keep the forced Flense DoT applied (WHC + panel on only).
+-- Update: keep the forced Flense DoT applied (WHC + panel on + the gameplay
+-- gate only); take it back the moment the gate closes.
 -- ---------------------------------------------------------------------------
 function M.update(dt)
-	if active() then
+	if active() and mod._gameplay_on("force_flense") then
 		pcall(maintain_forced_flense)
-	else
-		flense_forced_unit = nil
+	elseif flense_forced_unit then
+		pcall(remove_forced_flense)
+	end
+	-- Live status for the control panel: only true while we are actually holding a
+	-- granted (not naturally equipped) Flense buff on the player.
+	if mod._gameplay_live then
+		mod._gameplay_live.force_flense = flense_forced_unit ~= nil
+			and Unit.alive(flense_forced_unit)
+			and not talent_equipped(flense_forced_unit, TALENT_FLENSE)
 	end
 end
 
@@ -439,6 +479,7 @@ end
 
 function M.log_state()
 	if not DBG then return end
+	local totals = F.merge_sets(totals_cat)
 	dlog("L10 SNAP total/first (uncap): ri=%.1f/%.1f (%.1f) dk=%.1f/%.1f (%.1f) fl=%.1f/%.1f (%.1f)",
 		totals.riposte.total_dmg, totals.riposte.first_dmg, totals.riposte.total_uncapped,
 		totals.deathknell.total_dmg, totals.deathknell.first_dmg, totals.deathknell.total_uncapped,
@@ -453,6 +494,8 @@ end
 function M.draw(gui)
 	local FONT_SIZE = ui.FONT_SIZE
 	local small = FONT_SIZE - 6
+
+	local totals = F.merge_sets(totals_cat)
 
 	-- rows: title (0) + header (1) + 3 talents (2..4) + note (5). content_rows = 5
 	-- so Reset sits directly beneath the note.
@@ -474,11 +517,17 @@ function M.draw(gui)
 	-- take"); when it IS equipped its counters carry no meaning, so show dashes.
 	local player_unit = local_player_unit()
 	local riposte_equipped = player_unit and talent_equipped(player_unit, TALENT_RIPOSTE)
+	-- Flense only accumulates while its DoT actually exists: equipped, or granted by
+	-- the (gameplay-gated) forcing. Otherwise mark the row (off).
+	local flense_live = player_unit and (talent_equipped(player_unit, TALENT_FLENSE)
+		or mod._gameplay_on("force_flense"))
 
 	for i, talent in ipairs(TALENTS10) do
 		local rec = totals[talent]
 		local ry = row_y(i + 1)
-		ui.text(gui, TALENT10_NAMES[talent], x, ry, FONT_SIZE, ui.white)
+		local name = TALENT10_NAMES[talent]
+		if talent == "flense" and not flense_live then name = name .. " (off)" end
+		ui.text(gui, name, x, ry, FONT_SIZE, ui.white)
 		if talent == "riposte" and riposte_equipped then
 			ui.text(gui, "-", x + T10_TOTAL_COL, ry, FONT_SIZE, ui.white)
 			ui.text(gui, "-", x + T10_UNCAP_COL, ry, FONT_SIZE, ui.white)
@@ -496,8 +545,15 @@ function M.draw(gui)
 		end
 	end
 
-	ui.text(gui, "Flense DoT is force-applied (modded realm). Most accurate as host.",
-		x, row_y(#TALENTS10 + 2), small, ui.grey)
+	local note
+	if flense_live and not talent_equipped(player_unit, TALENT_FLENSE) then
+		note = "Flense DoT is FORCE-applied (gameplay setting). Most accurate as host."
+	elseif flense_live then
+		note = "Flense equipped: its real DoT is measured. Most accurate as host."
+	else
+		note = "Flense off: enable 'Allow gameplay' + 'Force Flense' to measure its DoT."
+	end
+	ui.text(gui, note, x, row_y(#TALENTS10 + 2), small, ui.grey)
 end
 
 return M

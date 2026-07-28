@@ -120,7 +120,7 @@ local function is_merc_rfa(unit, ce)
 end
 
 local function active()
-	return mod:get("show_ult_refund")
+	return true
 end
 
 -- ---------------------------------------------------------------------------

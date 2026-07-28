@@ -33,6 +33,15 @@
 
 local M = {}
 
+-- Per-unit-category display filter. Set by the entry file via M.set_filter so the
+-- read-side (:get) can merge the categories the current filter selects. Defaults to
+-- "all" (sum every category) until wired.
+local function default_filter() return "all" end
+M._filter = default_filter
+function M.set_filter(fn) M._filter = fn or default_filter end
+
+local CATS = { "es", "mon", "trash" }
+
 local function game_time()
 	local ok, t = pcall(function () return Managers.time:time("game") end)
 	if ok and t then return t end
@@ -54,28 +63,45 @@ Tracker.__index = Tracker
 
 function M.new()
 	local self = setmetatable({}, Tracker)
-	self.kills = {}       -- talent -> { n, hpk_sum, hpk_n, real_total }
+	-- Kills partitioned by unit category: kills[cat][talent] -> {n,hpk_sum,hpk_n,real_total}.
+	-- Each unit belongs to exactly one category, so no double counting.
+	self.kills = { es = {}, mon = {}, trash = {} }
 	self.unit_state = {}  -- target_unit -> per-unit accumulators (see :track)
 	return self
 end
 
--- The kills record for `talent`, lazily created so callers need not pre-register.
-function Tracker:rec(talent)
-	local r = self.kills[talent]
+-- The kills record for `talent` in category `cat`, lazily created.
+function Tracker:rec(cat, talent)
+	local bucket = self.kills[cat] or self.kills.trash
+	local r = bucket[talent]
 	if not r then
 		r = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
-		self.kills[talent] = r
+		bucket[talent] = r
 	end
 	return r
 end
 
--- Read-only accessor for draw (may be nil before the talent's first credit).
+-- Read-only accessor for draw: the talent's kills merged over the categories the
+-- current filter selects. Always returns a record (zeros before any credit).
 function Tracker:get(talent)
-	return self.kills[talent]
+	local f = M._filter()
+	local out = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
+	for _, cat in ipairs(CATS) do
+		if f == "all" or f == cat then
+			local r = self.kills[cat] and self.kills[cat][talent]
+			if r then
+				out.n = out.n + r.n
+				out.hpk_sum = out.hpk_sum + r.hpk_sum
+				out.hpk_n = out.hpk_n + r.hpk_n
+				out.real_total = out.real_total + r.real_total
+			end
+		end
+	end
+	return out
 end
 
 function Tracker:reset()
-	self.kills = {}
+	self.kills = { es = {}, mon = {}, trash = {} }
 	self.unit_state = {}
 end
 
@@ -100,20 +126,21 @@ end
 --   health      : the target's real pre-hit HP (nil -> skip the crossing check,
 --                 threshold unknown, but keep accumulating for later hits).
 --   real_kill   : true if THIS hit is the real killing blow you landed on the unit.
-function Tracker:track(target_unit, talent, without_add, with_add, health, real_kill)
+function Tracker:track(target_unit, talent, without_add, with_add, health, real_kill, cat)
 	local st = self.unit_state[target_unit]
 	if not st then
-		st = { init = health, with = {}, without = {}, counted = {}, hits = {},
+		st = { init = health, cat = cat or "trash", with = {}, without = {}, counted = {}, hits = {},
 			frozen = {}, real_counted = {} }
 		self.unit_state[target_unit] = st
 	end
+	cat = cat or st.cat or "trash"
 	if not st.init and health then st.init = health end
 	local h = (st.hits[talent] or 0) + 1
 	st.hits[talent] = h
 	local w  = (st.with[talent] or 0) + with_add
 	local wo = (st.without[talent] or 0) + without_add
 	st.with[talent], st.without[talent] = w, wo
-	local kills = self:rec(talent)
+	local kills = self:rec(cat, talent)
 	-- Talent-world kill: the hit at which this talent's cumulative damage would have
 	-- finished the unit. Recorded for EVERY unit the talent would kill (`with` crosses
 	-- the threshold), latched once -- this is the hits-to-kill in the talent's world,
@@ -127,19 +154,13 @@ function Tracker:track(target_unit, talent, without_add, with_add, health, real_
 			kills.n = kills.n + 1
 		end
 		-- REAL TOTAL: of the extra damage banked into this unit, how much actually
-		-- contributed to killing it sooner. At the talent-world killing hit K, the
-		-- extra banked over hits 1..K-1 is (with_{K-1} - without_{K-1}); the killing
-		-- hit's own extra is discarded (the unit dies on this hit regardless). If the
-		-- baseline damage alone OVERKILLS the talent-world remaining HP on hit K, that
-		-- overkill margin means some of the banked extra was unnecessary and is
-		-- subtracted. Clamped to >= 0.
-		local prev_with    = w - with_add          -- with_{K-1}
-		local prev_without = wo - without_add       -- without_{K-1}
-		local e_before     = prev_with - prev_without
-		local remaining    = st.init - prev_with    -- talent-world HP before killing hit
-		local overkill     = without_add - remaining
-		if overkill < 0 then overkill = 0 end
-		local real = e_before - overkill
+		-- contributed to killing it sooner -- the baseline shortfall at the talent-
+		-- world killing hit, init - without_total. If the baseline also crosses on
+		-- this hit (wo >= init, not an early kill) that's <= 0 -> nothing credited.
+		-- On an early kill it is exactly the extra needed to bridge the gap, incl.
+		-- the killing hit's own share (w >= init guarantees it never exceeds the
+		-- w - wo actually banked), so every Early Kill credits a positive amount.
+		local real = st.init - wo
 		if real > 0 then
 			kills.real_total = kills.real_total + real
 		end
@@ -169,9 +190,9 @@ end
 
 -- Open a batch for one genuine hit. `model_final` is the calculate_damage return the
 -- callers model from; `health` is the target's pre-hit HP.
-function M.begin_hit(target_unit, model_final, health)
+function M.begin_hit(target_unit, model_final, health, cat)
 	cur_batch = { target = target_unit, model_final = model_final, health = health,
-		t = game_time(), entries = {} }
+		cat = cat or "trash", t = game_time(), entries = {} }
 end
 
 -- Close the current batch, enqueuing it (per target) only if any tracker added to it.
@@ -198,7 +219,7 @@ local function flush(target_unit, real_damage)
 	end
 	local real_kill = b.health and real_damage and (b.health - real_damage <= 0) or false
 	for _, e in ipairs(b.entries) do
-		e.tracker:track(target_unit, e.talent, e.without * K, e["with"] * K, b.health, real_kill)
+		e.tracker:track(target_unit, e.talent, e.without * K, e["with"] * K, b.health, real_kill, b.cat)
 	end
 	return true
 end

@@ -41,6 +41,27 @@ M.instances = {}
 -- safe and replaces the old ep_recompute_mult / mod._l20_power_mult pair.
 M.recompute_mult = nil
 
+-- Per-unit-category bucketing (set by the level-15 module in init). cat_fn maps a
+-- unit -> "es"|"mon"|"trash"; filter_fn returns the active display filter.
+M.cat_fn = function () return "trash" end
+M.filter_fn = function () return "all" end
+function M.set_category_fns(cat_fn, filter_fn)
+	M.cat_fn = cat_fn or M.cat_fn
+	M.filter_fn = filter_fn or M.filter_fn
+end
+
+local CATS = { "es", "mon", "trash" }
+local function bkt() return { es = 0, mon = 0, trash = 0 } end
+local function badd(b, cat, v) b[cat or "trash"] = (b[cat or "trash"] or 0) + (v or 0) end
+-- Sum a bucket over the categories the current filter selects.
+local function bread(b)
+	if type(b) == "number" then return b end
+	if not b then return 0 end
+	local f = M.filter_fn()
+	if f ~= "all" then return b[f] or 0 end
+	return (b.es or 0) + (b.mon or 0) + (b.trash or 0)
+end
+
 -- ---------------------------------------------------------------------------
 -- Shared helpers (mirror the other modules).
 -- ---------------------------------------------------------------------------
@@ -119,17 +140,21 @@ function M.register(boost)
 end
 
 function Boost:reset()
-	-- Extra damage (overkill-accounted / first / raw) and its source split.
-	self.total_dmg = 0
-	self.first_dmg = 0
-	self.total_uncapped = 0
-	self.src_melee = 0
-	self.src_ranged = 0
-	self.src_other = 0
+	-- Extra damage (overkill-accounted / first / raw) and its source split. Each is a
+	-- per-category bucket {es,mon,trash}; reads go through Boost:rd (filter-aware).
+	self.total_dmg = bkt()
+	self.first_dmg = bkt()
+	self.total_uncapped = bkt()
+	self.src_melee = bkt()
+	self.src_ranged = bkt()
+	self.src_other = bkt()
 	-- Extra cleave: units only this boost's higher power reached, and their damage.
-	self.extra_units_hit = 0
-	self.extra_cleave_dmg = 0
-	self.extra_cleave_uncapped = 0
+	self.extra_units_hit = bkt()
+	self.extra_cleave_dmg = bkt()
+	self.extra_cleave_uncapped = bkt()
+	-- Rough estimate of extra units (force-cleave OFF): no target unit is known, so it
+	-- is category-agnostic and only surfaces under the "All" filter.
+	self.extra_units_est = 0
 	-- Per-sweep force-cleave state (armed by M.run_sweep, read by M.run_classify).
 	self.base_mass = nil       -- no-boost cleave-mass budget for the current sweep
 	self.cur_sweep = nil       -- the ActionSweep instance we forced
@@ -137,6 +162,19 @@ function Boost:reset()
 	self.extra_units = {}       -- unit -> true: reached ONLY via this boost's budget
 	self.natural = nil         -- true when the boost is EQUIPPED and we are measuring
 	                           -- the real (already-boosted) sweep's own extra cleave
+end
+
+-- Filter-aware read of a bucketed accumulator field (e.g. "total_dmg").
+function Boost:rd(field)
+	return bread(self[field])
+end
+
+-- Extra units this boost reached: the measured/forced count (filtered) plus, only
+-- under the "All" filter, the rough estimate (which has no unit category).
+function Boost:units_hit()
+	local n = bread(self.extra_units_hit)
+	if M.filter_fn() == "all" then n = n + (self.extra_units_est or 0) end
+	return n
 end
 
 -- Resolve the current multiplier (number, or a function evaluated live).
@@ -173,15 +211,16 @@ function Boost:account_hit(ctx, is_melee, first, health)
 	end
 	if extra <= 0 then return 0 end
 	local capped = useful_extra(base, extra, health)
-	self.total_uncapped = self.total_uncapped + extra
-	self.total_dmg = self.total_dmg + capped
-	if first then self.first_dmg = self.first_dmg + capped end
+	local cat = M.cat_fn(ctx.target_unit)
+	badd(self.total_uncapped, cat, extra)
+	badd(self.total_dmg, cat, capped)
+	if first then badd(self.first_dmg, cat, capped) end
 	if ctx.damage_profile.is_dot then
-		self.src_other = self.src_other + capped
+		badd(self.src_other, cat, capped)
 	elseif is_melee then
-		self.src_melee = self.src_melee + capped
+		badd(self.src_melee, cat, capped)
 	else
-		self.src_ranged = self.src_ranged + capped
+		badd(self.src_ranged, cat, capped)
 	end
 	return extra
 end
@@ -191,9 +230,10 @@ end
 -- accounting for that unit). Callers dedupe melee before calling this.
 function Boost:account_cleave_unit(target_unit, final, health)
 	if not self.extra_units[target_unit] then return false end
-	self.extra_units_hit = self.extra_units_hit + 1
-	self.extra_cleave_dmg = self.extra_cleave_dmg + useful_extra(0, final, health)
-	self.extra_cleave_uncapped = self.extra_cleave_uncapped + final
+	local cat = M.cat_fn(target_unit)
+	badd(self.extra_units_hit, cat, 1)
+	badd(self.extra_cleave_dmg, cat, useful_extra(0, final, health))
+	badd(self.extra_cleave_uncapped, cat, final)
 	return true
 end
 
@@ -274,7 +314,7 @@ function M.run_sweep(sweep, power_level, owner_unit, buff_ext)
 				-- Hypothetical estimate: how many extra units this boost would reach.
 				-- Rough (mass budgets read as unit counts; exact only for mass-1 foes).
 				local extra = math.floor(ua) - math.floor(base_attack)
-				if extra > 0 then b.extra_units_hit = b.extra_units_hit + extra end
+				if extra > 0 then b.extra_units_est = (b.extra_units_est or 0) + extra end
 			end
 		end
 	end

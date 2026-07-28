@@ -13,6 +13,15 @@ local mod = get_mod("TalentComparisonMod")
 
 local BASE = "scripts/mods/TalentComparisonMod/modules/"
 local ui    = mod:dofile(BASE .. "ui_panel")
+-- Shared per-unit-category bucketing + the global display filter. Loaded first and
+-- exposed as mod._filter so every value module can F.add/F.read through it.
+local filter = mod:dofile(BASE .. "unit_filter")
+filter.init(mod)
+mod._filter = filter
+-- Gameplay-affecting feature switchboard (master consent + per-feature gates,
+-- L15-row unequip). Loaded before the value modules so mod._gameplay_on exists.
+local gameplay = mod:dofile(BASE .. "gameplay_control")
+local control = mod:dofile(BASE .. "control_panel")
 local thp   = mod:dofile(BASE .. "thp_talents")
 local level15 = mod:dofile(BASE .. "level15_talents")
 local level10 = mod:dofile(BASE .. "level10_whc_talents")
@@ -30,7 +39,31 @@ local crit_tracker = mod:dofile(BASE .. "crit_tracker")
 -- client_owner_start_action, apply_buffs_to_power_level) via mod._l20_* forwards.
 -- level10_merc registers power_boost instances, so it must init AFTER level15 (which
 -- owns mod._power_boost); its position after level15 in this list guarantees that.
-local groups = { thp, level15, level10, level20, level10_merc, ult_refund, crit_tracker }
+-- control_panel is FIRST: it is always drawn (even while everything else is hidden)
+-- so the Hide/Show + unit-filter buttons stay reachable.
+local groups = { control, gameplay, thp, level15, level10, level20, level10_merc, ult_refund, crit_tracker }
+
+-- Tab bar (control panel): one TOGGLE button per tab, ordered by talent level,
+-- utility panels grouped under "Other Stats". Each tab independently shows/hides
+-- its module(s)' free-floating draggable panel(s); any number can be on at once.
+-- A tab only appears while one of its modules is available (career-gated tabs
+-- follow the current career).
+local TABS = {
+	{ id = "lvl5",  label = "Lvl 5",       groups = { thp } },
+	{ id = "lvl10", label = "Lvl 10",      groups = { level10, level10_merc } },
+	{ id = "lvl15", label = "Lvl 15",      groups = { level15 } },
+	{ id = "lvl20", label = "Lvl 20",      groups = { level20 } },
+	{ id = "other", label = "Other Stats", groups = { ult_refund, crit_tracker } },
+}
+mod._tabs = TABS
+
+-- Per-tab visibility toggle (persisted; default on). Shared with the control
+-- panel, which draws the toggle buttons.
+mod._tab_enabled = function (id)
+	local v = mod:get("show_tab_" .. id)
+	if v == nil then return true end
+	return v
+end
 
 local function reset_all()
 	-- Snapshot every group's totals to chat/log before clearing, so the Reset
@@ -88,29 +121,42 @@ mod.update = function (dt)
 		return
 	end
 
-	local any = false
-	for _, g in ipairs(groups) do
-		if g.wants_display() then any = true break end
-	end
-	if not any then return end
+	-- Global hide: when on, only the control panel is drawn so the Hide/Show +
+	-- filter + tab buttons stay reachable to bring the content back.
+	local hidden = mod._hide_all == true
 
 	local gui = ui.get_gui()
 	if not gui then return end
 
 	local cursor_active = ui.cursor_active()
 
-	for _, g in ipairs(groups) do
-		if g.wants_display() then
-			-- Guard each draw: if the cached GUI has gone stale (an incompatible
-			-- mod or a level teardown can destroy it without the world changing),
-			-- Gui.rect/Gui.text throws "Gui expected, got userdata". Swallow it and
-			-- invalidate the GUI so it's rebuilt next frame instead of aborting the
-			-- whole update (which left the panels permanently blank).
-			local ok, err = pcall(g.draw, gui)
-			if not ok then
-				ui.invalidate_gui()
-				if err then mod:dump(err, "TalentComparisonMod draw", 1) end
-				return
+	-- Guard each draw: if the cached GUI has gone stale (an incompatible mod or a
+	-- level teardown can destroy it without the world changing), Gui.rect/Gui.text
+	-- throws "Gui expected, got userdata". Swallow it and invalidate the GUI so
+	-- it's rebuilt next frame instead of aborting the whole update (which left
+	-- the panels permanently blank).
+	local function safe_draw(g)
+		local ok, err = pcall(g.draw, gui)
+		if not ok then
+			ui.invalidate_gui()
+			if err then mod:dump(err, "TalentComparisonMod draw", 1) end
+			return false
+		end
+		return true
+	end
+
+	-- The control panel (tab bar host) is always drawn so the Hide / filter /
+	-- tab-toggle buttons stay reachable.
+	if not safe_draw(control) then return end
+
+	-- Draw every toggled-on tab's module panels (free-floating, individually
+	-- draggable), unless the global Hide is on.
+	if not hidden then
+		for _, tab in ipairs(TABS) do
+			if mod._tab_enabled(tab.id) then
+				for _, g in ipairs(tab.groups) do
+					if g.wants_display() and not safe_draw(g) then return end
+				end
 			end
 		end
 	end
@@ -124,6 +170,12 @@ end
 mod.reset = function ()
 	reset_all()
 	mod:echo("Talent comparison totals reset.")
+end
+
+-- Bound to the Hide keybind (unbound by default): toggle the global hide-all so
+-- every panel except the control panel is shown/hidden.
+mod.toggle_hide = function ()
+	filter.toggle_hidden()
 end
 
 local function current_level_is_hub()
@@ -156,4 +208,10 @@ end
 
 mod.on_enabled = function ()
 	-- nothing special
+end
+
+mod.on_disabled = function ()
+	-- Hand back anything we changed in gameplay (the removed L15 talent row) before
+	-- going quiet; the forced buffs/spreads simply stop being maintained.
+	gameplay.restore()
 end
