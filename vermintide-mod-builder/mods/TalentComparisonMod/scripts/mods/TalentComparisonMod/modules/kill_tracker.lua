@@ -33,14 +33,14 @@
 
 local M = {}
 
--- Per-unit-category display filter. Set by the entry file via M.set_filter so the
--- read-side (:get) can merge the categories the current filter selects. Defaults to
--- "all" (sum every category) until wired.
-local function default_filter() return "all" end
+-- Per-unit-category display filter. Set via M.set_filter to an enabled(cat)->bool
+-- predicate so the read-side (:get) can merge the categories the multi-select filter
+-- selects. Defaults to every category on until wired.
+local function default_filter() return true end
 M._filter = default_filter
 function M.set_filter(fn) M._filter = fn or default_filter end
 
-local CATS = { "es", "mon", "trash" }
+local CATS = { "elite", "special", "mon", "trash" }
 
 local function game_time()
 	local ok, t = pcall(function () return Managers.time:time("game") end)
@@ -65,7 +65,7 @@ function M.new()
 	local self = setmetatable({}, Tracker)
 	-- Kills partitioned by unit category: kills[cat][talent] -> {n,hpk_sum,hpk_n,real_total}.
 	-- Each unit belongs to exactly one category, so no double counting.
-	self.kills = { es = {}, mon = {}, trash = {} }
+	self.kills = { elite = {}, special = {}, mon = {}, trash = {} }
 	self.unit_state = {}  -- target_unit -> per-unit accumulators (see :track)
 	return self
 end
@@ -84,10 +84,9 @@ end
 -- Read-only accessor for draw: the talent's kills merged over the categories the
 -- current filter selects. Always returns a record (zeros before any credit).
 function Tracker:get(talent)
-	local f = M._filter()
 	local out = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
 	for _, cat in ipairs(CATS) do
-		if f == "all" or f == cat then
+		if M._filter(cat) then
 			local r = self.kills[cat] and self.kills[cat][talent]
 			if r then
 				out.n = out.n + r.n
@@ -101,7 +100,7 @@ function Tracker:get(talent)
 end
 
 function Tracker:reset()
-	self.kills = { es = {}, mon = {}, trash = {} }
+	self.kills = { elite = {}, special = {}, mon = {}, trash = {} }
 	self.unit_state = {}
 end
 

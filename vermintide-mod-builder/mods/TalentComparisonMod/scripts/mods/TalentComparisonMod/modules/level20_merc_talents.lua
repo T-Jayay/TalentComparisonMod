@@ -293,7 +293,7 @@ local function finalize_swing()
 	-- attack speed WOULD have given them during those windows. See finalize_ally_swing.
 
 	dlog("SWING t=%.2f targets=%d dmg=%.1f | basePS m=%s ET m=%s",
-		swing.t, swing.targets, (swing.dmg.es + swing.dmg.mon + swing.dmg.trash),
+		swing.t, swing.targets, (swing.dmg.elite + swing.dmg.special + swing.dmg.mon + swing.dmg.trash),
 		(base_track.expiry and swing.t < base_track.expiry) and "on" or "off",
 		(et_track.expiry and swing.t < et_track.expiry) and "on" or "off")
 end
@@ -308,7 +308,7 @@ local function on_swing_start(self, power_level)
 	if not is_melee(dp) then return end
 	-- The previous swing is complete once the next one begins.
 	finalize_swing()
-	cur_swing = { dmg = { es = 0, mon = 0, trash = 0 }, targets = 0, t = game_time(), seen = {} }
+	cur_swing = { dmg = { elite = 0, special = 0, mon = 0, trash = 0 }, targets = 0, t = game_time(), seen = {} }
 end
 
 -- ---------------------------------------------------------------------------
@@ -356,7 +356,7 @@ local function on_hit(ctx)
 			return   -- duplicate/deduped call for a hit already counted this swing.
 		end
 		if not swing then
-			swing = { dmg = { es = 0, mon = 0, trash = 0 }, targets = 0, t = now, seen = {} }
+			swing = { dmg = { elite = 0, special = 0, mon = 0, trash = 0 }, targets = 0, t = now, seen = {} }
 			cur_swing = swing
 		end
 	end
@@ -440,7 +440,7 @@ local function on_ally_hit(ctx)
 		tr = {
 			base_sim = AttackSpeedSim.new(),   -- vanilla + TB: Merc >=3 proc timeline
 			st_sim = AttackSpeedSim.new(),     -- TB: Merc >=1 proc timeline
-			dmg = { es = 0, mon = 0, trash = 0 }, last_t = nil, open = false, seen = {},
+			dmg = { elite = 0, special = 0, mon = 0, trash = 0 }, last_t = nil, open = false, seen = {},
 		}
 		ally_tracks[unit] = tr
 	end
@@ -450,7 +450,7 @@ local function on_ally_hit(ctx)
 	end
 	if not tr.open then
 		tr.open = true
-		tr.dmg = { es = 0, mon = 0, trash = 0 }
+		tr.dmg = { elite = 0, special = 0, mon = 0, trash = 0 }
 		tr.seen = {}
 		tr.base_active = base_track.expiry ~= nil and now < base_track.expiry  -- Merc >=3 window
 		tr.st_active   = st_track.expiry ~= nil and now < st_track.expiry      -- TB: Merc >=1 window
@@ -516,7 +516,7 @@ function M.init(owner_mod, ui_panel)
 	F = mod._filter
 	AttackSpeedSim = mod:dofile("scripts/mods/TalentComparisonMod/modules/attack_speed_sim")
 	-- Ghost swings value only the selected unit category's hits.
-	AttackSpeedSim.set_filter(function () return F.get_filter() end)
+	AttackSpeedSim.set_filter(F.enabled)
 
 	-- Reikland Reaper reuses Enhanced Power's power_boost engine (same damage /
 	-- source / cleave logic) with its own +15% power and its Paced-Strikes gate.

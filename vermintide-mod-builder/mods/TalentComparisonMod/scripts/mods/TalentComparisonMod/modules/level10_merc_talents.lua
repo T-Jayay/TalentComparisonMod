@@ -104,8 +104,8 @@ local HELBORG_HIT_COUNT = 5
 -- active category's record during crediting and at a merged view during draw.
 local helborg      -- ACTIVE Official variant { total_dmg, first_dmg, total_uncapped }
 local helborg_tb   -- ACTIVE TB variant (forced-crit gains only)
-local helborg_cat     -- { es=, mon=, trash= } Official
-local helborg_tb_cat  -- { es=, mon=, trash= } TB
+local helborg_cat     -- { elite=, special=, mon=, trash= } Official
+local helborg_tb_cat  -- { elite=, special=, mon=, trash= } TB
 local F            -- unit_filter (mod._filter), set in init
 local helborg_hits -- attack counter toward the next guaranteed crit
 local cur_attack   -- per-attack Helborg decision, set at first target, reused for cleaved targets
@@ -123,7 +123,8 @@ local function new_record()
 end
 
 local function fresh_cat()
-	return { es = new_record(), mon = new_record(), trash = new_record() }
+	return { elite = new_record(), special = new_record(),
+		mon = new_record(), trash = new_record() }
 end
 
 -- Module-scope initialization so draw/credit never index a nil record before the

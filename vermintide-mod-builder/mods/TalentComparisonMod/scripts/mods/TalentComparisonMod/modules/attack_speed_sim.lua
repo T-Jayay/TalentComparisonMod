@@ -46,13 +46,13 @@ local M = {}
 M.__index = M
 
 -- Per-unit-category support. Each swing's damage is split by the category of the
--- unit(s) it hit (es / mon / trash), so a ghost swing carries only the damage on the
--- selected category -- "only records the hits on each specific unit type". The
--- CADENCE (how many ghosts a swing spawns) is category-agnostic; only the damage each
--- ghost carries is split. extra() sums the categories the active filter selects.
-local CATS = { "es", "mon", "trash" }
-M.filter_fn = function () return "all" end
-function M.set_filter(fn) M.filter_fn = fn or M.filter_fn end
+-- unit(s) it hit (elite / special / mon / trash), so a ghost swing carries only the
+-- damage on the selected category -- "only records the hits on each specific unit
+-- type". The CADENCE (how many ghosts a swing spawns) is category-agnostic; only the
+-- damage each ghost carries is split. extra() sums the enabled categories.
+local CATS = { "elite", "special", "mon", "trash" }
+M.enabled_fn = function () return true end
+function M.set_filter(fn) M.enabled_fn = fn or M.enabled_fn end
 
 -- Integers j with a <= j < b (the half-open window). Epsilon guards the float
 -- boundaries so an exact integer edge lands in exactly one window, never both.
@@ -69,14 +69,14 @@ end
 
 function M:reset()
 	self.pos = 0.0          -- ghost-timeline cursor, in real-swing units
-	self.real_dmg = { es = 0, mon = 0, trash = 0 }   -- real swing damage by category
-	self.ghost_dmg = { es = 0, mon = 0, trash = 0 }  -- ghost (resampled) damage by category
+	self.real_dmg = { elite = 0, special = 0, mon = 0, trash = 0 }   -- real swing dmg by cat
+	self.ghost_dmg = { elite = 0, special = 0, mon = 0, trash = 0 }  -- ghost (resampled) by cat
 	self.real_swings = 0
 	self.ghost_swings = 0
 end
 
 -- Feed one real swing. `damage` = its real damage: either a number (all attributed
--- to "trash") or a per-category table {es=,mon=,trash=} split by the units it hit.
+-- to "trash") or a per-category table {elite=,special=,mon=,trash=} split by units hit.
 -- `m` = the speed multiplier this instance models for this swing (1.0 = buff down).
 function M:add_swing(damage, m)
 	m = m or 1
@@ -102,10 +102,9 @@ end
 -- Extra damage the modeled attack speed would have added this run (ghost - real),
 -- summed over the categories the active filter selects. Negative for a decrease.
 function M:extra()
-	local f = M.filter_fn()
 	local g, r = 0, 0
 	for _, c in ipairs(CATS) do
-		if f == "all" or f == c then
+		if M.enabled_fn(c) then
 			g = g + self.ghost_dmg[c]
 			r = r + self.real_dmg[c]
 		end

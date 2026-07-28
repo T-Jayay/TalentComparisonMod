@@ -5,8 +5,10 @@
 --   * Hide-all : one Hide/Show button (also a keybind, mod.toggle_hide) that hides
 --                every OTHER panel. This panel is always drawn so it can be brought
 --                back.
---   * Unit filter : four buttons -- All / Elites+Specials / Monsters / Trash --
---                that switch what enemy category every value panel displays.
+--   * Unit filter : four MULTI-SELECT toggle buttons -- Elites / Specials /
+--                Monsters / Trash -- each an independent on/off switch. Every value
+--                panel sums the enabled categories, so any combination shows at once
+--                (e.g. Elites+Specials+Trash minus Monsters). At least one stays on.
 --   * Gameplay status line : one line under the buttons stating whether the mod
 --                is currently measure-only (green) or lists exactly which
 --                gameplay modifications are LIVE right now (orange) -- read from
@@ -22,12 +24,13 @@ local mod  -- set in init()
 local ui   -- shared ui_panel
 local F    -- unit_filter (mod._filter)
 
--- Filter buttons, in display order: {filter_value, label, width}.
+-- Filter toggle buttons, in display order: {category, label, width}. Each is an
+-- independent on/off toggle (multi-select); there is no "All" button.
 local FILTER_BTNS = {
-	{ "all",   "All",             56 },
-	{ "es",    "Elites+Specials", 150 },
-	{ "mon",   "Monsters",        108 },
-	{ "trash", "Trash",           78 },
+	{ "elite",   "Elites",   72 },
+	{ "special", "Specials", 84 },
+	{ "mon",     "Monsters", 96 },
+	{ "trash",   "Trash",    64 },
 }
 
 local PAD       = 10
@@ -173,12 +176,11 @@ function M.draw(gui)
 		end
 	end
 
-	-- Filter buttons row.
-	local cur = F.get_filter()
+	-- Filter toggle buttons row (multi-select: each category on/off independently).
 	local bx = x
 	for _, b in ipairs(FILTER_BTNS) do
-		local fval, label, bw = b[1], b[2], b[3]
-		local active = (cur == fval)
+		local cat, label, bw = b[1], b[2], b[3]
+		local active = F.enabled(cat)
 		local hover = cursor_active and ui.point_in_box(mx, my, bx, filt_bottom, bw, BTN_H)
 		local col
 		if active then
@@ -191,7 +193,7 @@ function M.draw(gui)
 		ui.rect(gui, bx, filt_bottom, bw, BTN_H, col, 860)
 		ui.text(gui, label, bx + 8, filt_bottom + 4, FONT_SIZE - 7, active and ui.yellow or ui.white)
 		if pressed and hover then
-			F.set_filter(fval)
+			F.toggle(cat)
 		end
 		bx = bx + bw + GAP
 	end

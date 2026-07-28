@@ -103,7 +103,7 @@ local TALENT10_NAMES = {
 -- Running totals
 -- ---------------------------------------------------------------------------
 local totals       -- ACTIVE record set: points at totals_cat[cat] per hit / merged in draw.
-local totals_cat   -- { es=, mon=, trash= }
+local totals_cat   -- { elite=, special=, mon=, trash= }
 local F            -- unit_filter (mod._filter), set in init
 
 local function new_record()
@@ -118,8 +118,10 @@ local function fresh_totals()
 	return t
 end
 
+-- Inline literal, not F.new_cat_set: this runs at module load, before F is set.
 local function fresh_totals_cat()
-	return { es = fresh_totals(), mon = fresh_totals(), trash = fresh_totals() }
+	return { elite = fresh_totals(), special = fresh_totals(),
+		mon = fresh_totals(), trash = fresh_totals() }
 end
 
 totals_cat = fresh_totals_cat()

@@ -132,7 +132,7 @@ local TALENT15_NAMES = {
 -- ---------------------------------------------------------------------------
 local totals   -- ACTIVE per-talent record set: points at totals_cat[cat] during
                -- crediting (set per hit) and at a merged view during draw.
-local totals_cat  -- { es=, mon=, trash= }, each a full fresh_totals() set.
+local totals_cat  -- { elite=, special=, mon=, trash= }, each a full fresh_totals() set.
 local F        -- unit_filter (mod._filter), set in init
 -- Enhanced Power is now valued by a shared power_boost.lua instance (extra damage,
 -- source split and cleave), reused by the level-20 Reikland Reaper module. Set in init.
@@ -181,9 +181,11 @@ local function fresh_totals()
 	return t
 end
 
--- Three independent record sets, one per unit category (es / mon / trash).
+-- Independent record sets, one per unit category (elite / special / mon / trash).
+-- (Inline literal, not F.new_cat_set: this runs at module load, before F is set.)
 local function fresh_totals_cat()
-	return { es = fresh_totals(), mon = fresh_totals(), trash = fresh_totals() }
+	return { elite = fresh_totals(), special = fresh_totals(),
+		mon = fresh_totals(), trash = fresh_totals() }
 end
 
 totals_cat = fresh_totals_cat()
@@ -454,9 +456,14 @@ local function account_hit(ctx)
 	local is_melee = not damage_profile.is_dot
 		and (damage_profile.charge_value == "light_attack" or damage_profile.charge_value == "heavy_attack")
 
-	-- Melee dedupe: credit each GENUINE hit exactly once (see melee_should_credit).
-	-- Shared with the level-10/20 forwards so all three agree on which call to count.
-	if is_melee and not melee_should_credit(ctx) then return end
+	-- Dedupe: credit each GENUINE hit exactly once (see melee_should_credit). Applies
+	-- to melee AND ranged attacks -- calculate_damage runs 2+ times per real hit
+	-- regardless of damage source (prediction + application), so ranged needs the
+	-- same guard melee has always had. DoT ticks are excluded: they never route
+	-- through server_apply_hit's self_ctx window (a separate DoT tick call path), so
+	-- gating them here would silently drop every tick instead of deduping it.
+	-- Shared with the level-10/20/crit forwards so all agree on which call to count.
+	if not damage_profile.is_dot and not melee_should_credit(ctx) then return end
 
 	-- Forced-cleave units: a melee hit that reached a unit ONLY because the general
 	-- force-cleave button extended a power boost's cleave (classified by pre-hit
@@ -759,8 +766,8 @@ function M.init(owner_mod, ui_panel)
 
 	-- Wire per-unit-category bucketing into the shared engines: kill_tracker merges
 	-- kills by the active filter; power_boost buckets its extra-damage by target.
-	KillTracker.set_filter(function () return F.get_filter() end)
-	PowerBoost.set_category_fns(F.cat_of, F.get_filter)
+	KillTracker.set_filter(F.enabled)
+	PowerBoost.set_category_fns(F.cat_of, F.enabled)
 
 	enhanced_boost = PowerBoost.register(PowerBoost.new({
 		mult = ep_power_bonus,   -- 0.075 vanilla / 0.10 under Tourney Balance (resolved live)
@@ -906,16 +913,16 @@ function M.init(owner_mod, ui_panel)
 		local prev = { ally = ally_ctx, self = self_ctx }
 		local is_melee = damage_profile
 			and (damage_profile.charge_value == "light_attack" or damage_profile.charge_value == "heavy_attack")
-		if not blocking and is_melee then
-			if attacker_unit == local_player_unit() then
-				-- Local player's real melee application: one window per genuine hit, so a
-				-- dual-wield attack's two sweeps each get counted (see account_hit).
-				-- Opened regardless of show_level15 so totals keep accumulating while
-				-- the panel is hidden.
-				self_ctx = { target = target_unit, credited = false }
-			elseif is_player_unit(attacker_unit) then
-				ally_ctx = { attacker = attacker_unit, target = target_unit, credited = false }
-			end
+		-- Local-player window: opened for ANY real hit (melee or ranged) -- server_apply_hit
+		-- is one call per genuine hit regardless of damage source, and calculate_damage
+		-- runs multiple times (prediction + application) for ranged too, so ranged
+		-- crediting needs the same dedupe melee already had (was previously melee-only,
+		-- which let every ranged hit be counted 2-3x, e.g. inflating Headshot Rate).
+		if not blocking and attacker_unit == local_player_unit() then
+			self_ctx = { target = target_unit, credited = false }
+		elseif not blocking and is_melee and is_player_unit(attacker_unit) then
+			-- Ally-Bulwark window stays melee only -- the aura only benefits melee hits.
+			ally_ctx = { attacker = attacker_unit, target = target_unit, credited = false }
 		end
 		return prev
 	end

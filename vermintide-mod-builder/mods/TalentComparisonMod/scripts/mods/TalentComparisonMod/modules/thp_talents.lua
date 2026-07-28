@@ -34,7 +34,7 @@ end
 -- Running totals
 -- ---------------------------------------------------------------------------
 -- The THP generated per talent, partitioned by the gaining hit/kill's unit category
--- (es / mon / trash) so the panel's Live/TB columns filter with the control panel.
+-- (elite / special / mon / trash) so the panel's Live/TB columns filter with the control panel.
 -- `totals` points at the active category during a gain event and at a merged view in
 -- draw. (The Decay / Dec % / Blocked columns model per-talent pools and are NOT
 -- category-split -- they stay aggregate; documented on the decay table below.)
@@ -51,7 +51,10 @@ local function fresh_totals()
 end
 
 local F   -- unit_filter (mod._filter), set in init
-local totals_cat = { es = fresh_totals(), mon = fresh_totals(), trash = fresh_totals() }
+-- F isn't set until init(); build the initial per-category set with an inline literal
+-- (reset() rebuilds it via F.new_cat_set once F is available).
+local totals_cat = { elite = fresh_totals(), special = fresh_totals(),
+	mon = fresh_totals(), trash = fresh_totals() }
 local totals = totals_cat.trash
 
 -- Per-swing latch for Regrowth (TB Sting): the finesse heal fires only on the
@@ -142,7 +145,7 @@ local function register_gain(key, amount)
 end
 
 function M.reset()
-	totals_cat = { es = fresh_totals(), mon = fresh_totals(), trash = fresh_totals() }
+	totals_cat = F.new_cat_set(fresh_totals)
 	totals = totals_cat.trash
 	for _, d in pairs(decay) do
 		d.timer = math.huge

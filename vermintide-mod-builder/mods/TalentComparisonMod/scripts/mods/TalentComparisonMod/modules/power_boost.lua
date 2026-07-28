@@ -42,24 +42,27 @@ M.instances = {}
 M.recompute_mult = nil
 
 -- Per-unit-category bucketing (set by the level-15 module in init). cat_fn maps a
--- unit -> "es"|"mon"|"trash"; filter_fn returns the active display filter.
+-- unit -> "elite"|"special"|"mon"|"trash"; enabled_fn(cat) reports whether that
+-- category is currently displayed (multi-select filter).
 M.cat_fn = function () return "trash" end
-M.filter_fn = function () return "all" end
-function M.set_category_fns(cat_fn, filter_fn)
+M.enabled_fn = function () return true end
+function M.set_category_fns(cat_fn, enabled_fn)
 	M.cat_fn = cat_fn or M.cat_fn
-	M.filter_fn = filter_fn or M.filter_fn
+	M.enabled_fn = enabled_fn or M.enabled_fn
 end
 
-local CATS = { "es", "mon", "trash" }
-local function bkt() return { es = 0, mon = 0, trash = 0 } end
+local CATS = { "elite", "special", "mon", "trash" }
+local function bkt() return { elite = 0, special = 0, mon = 0, trash = 0 } end
 local function badd(b, cat, v) b[cat or "trash"] = (b[cat or "trash"] or 0) + (v or 0) end
 -- Sum a bucket over the categories the current filter selects.
 local function bread(b)
 	if type(b) == "number" then return b end
 	if not b then return 0 end
-	local f = M.filter_fn()
-	if f ~= "all" then return b[f] or 0 end
-	return (b.es or 0) + (b.mon or 0) + (b.trash or 0)
+	local sum = 0
+	for _, c in ipairs(CATS) do
+		if M.enabled_fn(c) then sum = sum + (b[c] or 0) end
+	end
+	return sum
 end
 
 -- ---------------------------------------------------------------------------
@@ -141,7 +144,7 @@ end
 
 function Boost:reset()
 	-- Extra damage (overkill-accounted / first / raw) and its source split. Each is a
-	-- per-category bucket {es,mon,trash}; reads go through Boost:rd (filter-aware).
+	-- per-category bucket {elite,special,mon,trash}; reads go through Boost:rd (filter-aware).
 	self.total_dmg = bkt()
 	self.first_dmg = bkt()
 	self.total_uncapped = bkt()
@@ -170,10 +173,12 @@ function Boost:rd(field)
 end
 
 -- Extra units this boost reached: the measured/forced count (filtered) plus, only
--- under the "All" filter, the rough estimate (which has no unit category).
+-- when EVERY category is enabled, the rough estimate (which has no unit category).
 function Boost:units_hit()
 	local n = bread(self.extra_units_hit)
-	if M.filter_fn() == "all" then n = n + (self.extra_units_est or 0) end
+	local all_on = true
+	for _, c in ipairs(CATS) do if not M.enabled_fn(c) then all_on = false break end end
+	if all_on then n = n + (self.extra_units_est or 0) end
 	return n
 end
 

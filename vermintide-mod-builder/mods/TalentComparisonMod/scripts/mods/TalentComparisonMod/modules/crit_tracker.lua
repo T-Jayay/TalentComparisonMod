@@ -99,9 +99,10 @@ local function account_hit_headshot(ctx)
 	local is_melee = damage_profile.charge_value == "light_attack"
 		or damage_profile.charge_value == "heavy_attack"
 
-	-- Melee dedupe: calculate_damage fires 2-3x per real melee hit; share the
-	-- level-15 module's decision so this agrees with every other forward.
-	if is_melee and mod._l15_melee_credit and not mod._l15_melee_credit(ctx) then return end
+	-- Dedupe: calculate_damage fires 2-3x per real hit (melee AND ranged -- prediction
+	-- + application), so this must dedupe both; share the level-15 module's decision
+	-- so this agrees with every other forward. (DoT ticks were already excluded above.)
+	if mod._l15_melee_credit and not mod._l15_melee_credit(ctx) then return end
 
 	local weakspot = ctx.hit_zone_name == "head" or ctx.hit_zone_name == "neck"
 
