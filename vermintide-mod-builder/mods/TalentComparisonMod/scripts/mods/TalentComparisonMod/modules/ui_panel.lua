@@ -98,6 +98,15 @@ function ui.text_bold(gui, str, x, y, size, color)
 	ui.text(gui, str, x + 1, y, size, color)
 end
 
+-- Centers str horizontally around cx. There is no Gui.text_size in this API, so
+-- width is estimated from an average per-character advance for the arial font;
+-- good enough for short numeric/label columns to line up visually.
+local AVG_CHAR_W = 0.5
+function ui.text_centered(gui, str, cx, y, size, color)
+	local w = #str * size * AVG_CHAR_W
+	ui.text(gui, str, cx - w * 0.5, y, size, color)
+end
+
 function ui.rect(gui, x, y_bottom, w, h, color, z)
 	if not pcall(Gui.rect, gui, Vector3(x, y_bottom, z or 850), Vector2(w, h), color) then
 		ui.invalidate_gui()

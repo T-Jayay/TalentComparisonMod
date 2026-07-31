@@ -5,8 +5,15 @@
 -- 20 Mercenary) can report the same three kill-aware figures per talent:
 --   n          -- EARLY KILLS: units the talent's extra damage finished sooner than
 --                 the no-talent world (latched once per unit).
---   hpk_*      -- HITS/KILL: running average hits-to-kill in the talent's world over
---                 every unit you actually killed.
+--   saved_*    -- HITS SAVED/KILL: running average (over EVERY unit you actually killed)
+--                 of how many fewer hits the talent's world needed vs reality -- the real
+--                 hits-to-kill minus the hit at which the talent's cumulative damage would
+--                 have finished it. A talent that changes nothing reads 0.00, so this is
+--                 an unbiased, directly comparable measure (unlike hpk_*, which averaged
+--                 only the self-selected subset of units the talent's world finished --
+--                 flattering do-nothing talents and inflating strong ones; see below).
+--   hpk_*      -- HITS/KILL (legacy, no longer displayed): running average hits-to-kill in
+--                 the talent's world over only the units the talent's world reached.
 --   real_total -- REAL TOTAL: of the extra damage banked into units, how much actually
 --                 contributed to pulling a kill sooner (baseline-overkill discounted).
 --
@@ -63,7 +70,7 @@ Tracker.__index = Tracker
 
 function M.new()
 	local self = setmetatable({}, Tracker)
-	-- Kills partitioned by unit category: kills[cat][talent] -> {n,hpk_sum,hpk_n,real_total}.
+	-- Kills partitioned by unit category: kills[cat][talent] -> {n,saved_sum,saved_n,hpk_sum,hpk_n,real_total}.
 	-- Each unit belongs to exactly one category, so no double counting.
 	self.kills = { elite = {}, special = {}, mon = {}, trash = {} }
 	self.unit_state = {}  -- target_unit -> per-unit accumulators (see :track)
@@ -75,7 +82,7 @@ function Tracker:rec(cat, talent)
 	local bucket = self.kills[cat] or self.kills.trash
 	local r = bucket[talent]
 	if not r then
-		r = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
+		r = { n = 0, saved_sum = 0, saved_n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
 		bucket[talent] = r
 	end
 	return r
@@ -84,12 +91,14 @@ end
 -- Read-only accessor for draw: the talent's kills merged over the categories the
 -- current filter selects. Always returns a record (zeros before any credit).
 function Tracker:get(talent)
-	local out = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
+	local out = { n = 0, saved_sum = 0, saved_n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
 	for _, cat in ipairs(CATS) do
 		if M._filter(cat) then
 			local r = self.kills[cat] and self.kills[cat][talent]
 			if r then
 				out.n = out.n + r.n
+				out.saved_sum = out.saved_sum + r.saved_sum
+				out.saved_n = out.saved_n + r.saved_n
 				out.hpk_sum = out.hpk_sum + r.hpk_sum
 				out.hpk_n = out.hpk_n + r.hpk_n
 				out.real_total = out.real_total + r.real_total
@@ -125,7 +134,8 @@ end
 --   health      : the target's real pre-hit HP (nil -> skip the crossing check,
 --                 threshold unknown, but keep accumulating for later hits).
 --   real_kill   : true if THIS hit is the real killing blow you landed on the unit.
-function Tracker:track(target_unit, talent, without_add, with_add, health, real_kill, cat)
+--   model_extra : unused (kept for caller compatibility).
+function Tracker:track(target_unit, talent, without_add, with_add, health, real_kill, cat, model_extra)
 	local st = self.unit_state[target_unit]
 	if not st then
 		st = { init = health, cat = cat or "trash", with = {}, without = {}, counted = {}, hits = {},
@@ -166,11 +176,26 @@ function Tracker:track(target_unit, talent, without_add, with_add, health, real_
 	end
 	if real_kill and not st.real_counted[talent] then
 		st.real_counted[talent] = true
-		-- Hits to kill in this talent's world (frozen when the talent would have
-		-- finished it); fall back to real hits if the talent never reached the kill.
-		local sample = st.frozen[talent] or h
-		kills.hpk_sum = kills.hpk_sum + sample
-		kills.hpk_n   = kills.hpk_n + 1
+		-- HITS SAVED/KILL, averaged over EVERY unit you actually killed (unbiased
+		-- denominator). `h` is the real hits-to-kill (every talent is fed a pair on
+		-- every hit, so its hit counter equals reality); `frozen[talent]` is the hit at
+		-- which the talent's cumulative damage would have finished the unit. Units the
+		-- talent's world did NOT finish sooner (frozen nil, or frozen == h) save 0 --
+		-- we fall back to `h` so those kills still count in the average at 0, instead of
+		-- being dropped. Dropping them (the old Hits/Kill column) let a do-nothing talent
+		-- like Bulwark average only the easy few-hit kills its ~0 extra happened to cross
+		-- and silently exclude the hard multi-hit units, reading a deceptively low value.
+		local frozen = st.frozen[talent] or h
+		local saved = h - frozen
+		if saved < 0 then saved = 0 end
+		kills.saved_sum = kills.saved_sum + saved
+		kills.saved_n   = kills.saved_n + 1
+		-- Legacy Hits/Kill (no longer displayed): kept for the DBG log / callers.
+		local sample = st.frozen[talent]
+		if sample then
+			kills.hpk_sum = kills.hpk_sum + sample
+			kills.hpk_n   = kills.hpk_n + 1
+		end
 	end
 end
 
@@ -218,7 +243,8 @@ local function flush(target_unit, real_damage)
 	end
 	local real_kill = b.health and real_damage and (b.health - real_damage <= 0) or false
 	for _, e in ipairs(b.entries) do
-		e.tracker:track(target_unit, e.talent, e.without * K, e["with"] * K, b.health, real_kill, b.cat)
+		e.tracker:track(target_unit, e.talent, e.without * K, e["with"] * K, b.health, real_kill, b.cat,
+			e["with"] - e.without)
 	end
 	return true
 end

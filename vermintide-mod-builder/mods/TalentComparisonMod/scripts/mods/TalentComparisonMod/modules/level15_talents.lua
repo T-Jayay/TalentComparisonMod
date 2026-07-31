@@ -80,9 +80,17 @@ end
 -- panel there is no cross-mod estimate here, since the stagger number S we read
 -- off the target blackboard is the loaded mod's real S). TB's changes
 -- (scripts/mods/TourneyBalance/changes/thp_stagger_changes.lua):
---   * Mainstay REMOVED  -- no TB career can equip it, so the row is hidden.
+--   * Mainstay (linesman_unbalance) -- RE-ADDED in TB v37 with a NEW mechanic: a
+--     melee hit MARKS the target (rebaltourn_mainstay_stagger_mark_buff, a
+--     `dummy_stagger` +1 per stack, max 2 stacks, 2s, refreshed per hit); on the
+--     first 5 targets the stagger number reads base_sn + stacks (capped at 2). The
+--     mark is applied AFTER the causing hit's damage, so the first hit on a target
+--     gets nothing and repeated hits build toward +2 -- unlike vanilla Mainstay
+--     (S>0 -> S+1 immediately). Modeled per-target via `mainstay_marks`.
 --   * Assassin (finesse_unbalance) -- S=2 on head/neck ONLY; crit no longer procs.
---   * Bulwark (tank_unbalance_buff) -- bonus 0.10->0.15, duration 2s->5s.
+--   * Bulwark (tank_unbalance_buff) -- bonus 0.15->0.10, duration 5s->10s (v37;
+--     was 0.15/5s in the previous TB). Plus a self +10% power_level_impact (stagger
+--     strength) that we do not model, mirroring vanilla Bulwark's unmodeled self buff.
 --   * Enhanced Power (power_level_unbalance) -- +7.5% -> +10% power.
 --   * Smiter -- unchanged.
 local TB_MOD_IDS = { "TourneyBalance", "TourneyBalanceTesting", "Tourney Balance Testing" }
@@ -105,11 +113,17 @@ end
 
 -- Bulwark aura: window it lasts + flat bonus it adds to the stagger term.
 local BULWARK_WINDOW           = 2.0   -- seconds the aura lasts (vanilla)
-local BULWARK_WINDOW_TB        = 5.0   -- TB duration
+local BULWARK_WINDOW_TB         = 10.0  -- TB v37 duration (was 5s)
 local BULWARK_DAMAGE_TAKEN     = 0.10  -- vanilla +0.10 flat to the stagger bonus term
-local BULWARK_DAMAGE_TAKEN_TB  = 0.15  -- TB bonus
+local BULWARK_DAMAGE_TAKEN_TB  = 0.10  -- TB v37 bonus (was 0.15)
 local function bulwark_window()       return tb_mod_active() and BULWARK_WINDOW_TB or BULWARK_WINDOW end
 local function bulwark_damage_taken() return tb_mod_active() and BULWARK_DAMAGE_TAKEN_TB or BULWARK_DAMAGE_TAKEN end
+
+-- TB v37 Mainstay: the mark buff adds +1 stagger per stack (max 2), 2s duration,
+-- applied to the first 5 targets. Simulated per-target in `mainstay_marks`.
+local MAINSTAY_MARK_DUR   = 2.0
+local MAINSTAY_MAX_STACKS = 2
+local function mainstay_is_tb() return tb_mod_active() end
 
 -- Assassin (finesse) triggers S=2 on crit only in vanilla; TB drops the crit
 -- branch (head/neck weakspot only).
@@ -139,6 +153,7 @@ local F        -- unit_filter (mod._filter), set in init
 local PowerBoost    -- the shared module (dofiled once, shared via mod._power_boost)
 local enhanced_boost -- EP's power_boost instance (mult 0.075)
 local bulwark_marks = {}   -- target_unit -> game-time expiry of the +10% aura
+local mainstay_marks = {}  -- target_unit -> { exp, stacks } TB Mainstay stagger mark
 -- calculate_damage runs 2+ times per real melee hit (a prediction in
 -- ActionSweep._play_character_impact line 1289, then the actual application in
 -- server_apply_hit), so melee crediting must be deduped per unit. The duplicate
@@ -226,7 +241,7 @@ end
 
 -- Kill-column record for `talent` from the shared tracker, or an all-zero default
 -- before its first credit (so draw/log never index nil).
-local ZERO_KILLS = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
+local ZERO_KILLS = { n = 0, saved_sum = 0, saved_n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
 local function kget(talent)
 	return (l15_kt and l15_kt:get(talent)) or ZERO_KILLS
 end
@@ -242,6 +257,7 @@ function M.reset()
 	if l15_kt then l15_kt:reset() end
 	if KillTracker then KillTracker.clear_pending() end
 	table.clear(bulwark_marks)
+	table.clear(mainstay_marks)
 	if enhanced_boost then enhanced_boost:reset() end
 	table.clear(sweep_seen)
 	ally_ctx = nil
@@ -384,13 +400,23 @@ end
 
 -- Stagger number the CURRENTLY-equipped talent produced, so we can invert the
 -- real hit back to its pre-stagger base damage.
-local function equipped_stagger_number(buff_ext, base_sn, target_index, crit, weakspot)
+local function equipped_stagger_number(buff_ext, base_sn, target_index, crit, weakspot, target_buff_ext)
 	if not buff_ext then return base_sn end
 	local mainstay = buff_ext:has_buff_perk("linesman_stagger_damage")
 	local finesse  = buff_ext:has_buff_perk("finesse_stagger_damage")
 	local smiter   = buff_ext:has_buff_perk("smiter_stagger_damage")
-	if mainstay and base_sn > 0 then
-		return base_sn + 1
+	if mainstay then
+		-- TB v37: read the REAL dummy_stagger mark the game applied to this target
+		-- (first 5 targets only), so the inversion matches the damage that landed.
+		if mainstay_is_tb() then
+			if target_buff_ext and target_index and target_index <= 5 then
+				return math.min(target_buff_ext:apply_buffs_to_value(base_sn, "dummy_stagger"), 2)
+			end
+			return base_sn
+		end
+		-- Vanilla Mainstay: S>0 -> S+1 immediately.
+		if base_sn > 0 then return base_sn + 1 end
+		return base_sn
 	elseif ((crit and assassin_uses_crit()) or weakspot) and finesse then
 		return 2
 	elseif smiter then
@@ -497,6 +523,24 @@ local function account_hit(ctx)
 				tostring(damage_profile.charge_value or (damage_profile.is_dot and "dot")),
 				target_index, final_damage, ep_extra)
 		end
+		-- Real Total / kill-tracking still needs this ranged/DoT hit as a SHARED
+		-- baseline: it reduces the enemy's HP identically in every talent's world, so
+		-- without it a unit that dies (mostly) to ranged/staff never has its melee
+		-- stagger extra tip it over the kill threshold -- every stagger row would read
+		-- Real Total 0 for a ranged-heavy playstyle. Feed each talent the same
+		-- no-L15 base with zero melee extra (EP still gets its real all-source extra),
+		-- so cumulative damage tracks reality and a later melee stagger hit crosses
+		-- correctly. The batch (opened by the calculate_damage hook) is flushed against
+		-- the REAL applied damage by the add_damage hook, so real_kill detection works
+		-- for ranged kills too.
+		local ranged_base = ep_equipped and (final_damage - ep_extra) or final_damage
+		for _, talent in ipairs(STAGGER_TALENTS) do
+			-- Mainstay is melee-only; ranged/DoT hits feed it a zero-extra baseline
+			-- (same as smiter/assassin) so cumulative damage tracks reality.
+			l15_kt:add(talent, ranged_base, ranged_base)
+		end
+		l15_kt:add("bulwark", ranged_base, ranged_base)
+		l15_kt:add("enhanced", ranged_base, ranged_base + ep_extra)
 		return
 	end
 	local attack_type = damage_profile.charge_value
@@ -548,7 +592,7 @@ local function account_hit(ctx)
 
 	-- Invert the real hit: final = base * (coeff + bonus(equipped_sn)), aura included.
 	local eq_sn = no_reduction and base_sn
-		or equipped_stagger_number(player_buff_ext, base_sn, target_index, is_critical_strike, weakspot)
+		or equipped_stagger_number(player_buff_ext, base_sn, target_index, is_critical_strike, weakspot, target_buff_ext)
 	local denom = coeff + bonus_for(eq_sn)
 	if denom <= 0 then denom = 1 end
 	-- Strip the EQUIPPED level-15 talent's own extra damage so the baseline is a TRUE
@@ -582,18 +626,41 @@ local function account_hit(ctx)
 	-- (opened by the calculate_damage hook's begin_hit) via l15_kt:add, then flushed
 	-- against the REAL applied damage by the add_damage hook (see kill_tracker.lua).
 
-	-- Stagger-number talents (Smiter / Mainstay / Assassin). TB removed Mainstay,
-	-- so it credits nothing while the TB mod is loaded (its row is hidden too).
-	local skip_mainstay = tb_mod_active()
+	-- Stagger-number talents (Smiter / Mainstay / Assassin). Mainstay's stagger
+	-- model differs between vanilla (S>0 -> S+1 on THIS hit) and TB v37 (a target
+	-- mark that builds +1 stagger per repeated hit, first 5 targets only). Under TB
+	-- we read the PRIOR mark stacks for this hit, then bump the mark afterwards.
+	local ms_stacks = 0
+	if mainstay_is_tb() then
+		local m = mainstay_marks[target_unit]
+		ms_stacks = (m and m.exp >= game_time()) and m.stacks or 0
+	end
 	local extras = {}
 	for _, talent in ipairs(STAGGER_TALENTS) do
-		if not (talent == "mainstay" and skip_mainstay) then
-		local sn = no_reduction and base_sn
-			or talent_stagger_number(talent, base_sn, target_index, is_critical_strike, weakspot)
+		local sn
+		if talent == "mainstay" and mainstay_is_tb() then
+			sn = (target_index and target_index <= 5)
+				and math.min(base_sn + ms_stacks, 2) or base_sn
+		else
+			sn = no_reduction and base_sn
+				or talent_stagger_number(talent, base_sn, target_index, is_critical_strike, weakspot)
+		end
 		extras[talent] = base_damage * (bonus_no_aura(sn) - base_bonus)
 		credit(talent, extras[talent])
 		-- Earlier-kill: baseline = no-talent damage, world = baseline + this extra.
 		l15_kt:add(talent, base_no_talent, base_no_talent + extras[talent])
+	end
+
+	-- TB v37 Mainstay: mark/refresh this target AFTER the hit (game applies the
+	-- mark post-damage, so the causing hit uses only prior stacks). Melee direct
+	-- hits only -- we are already in the melee branch and past the dedupe gate.
+	if mainstay_is_tb() then
+		local m = mainstay_marks[target_unit]
+		if m and m.exp >= game_time() then
+			m.stacks = math.min(m.stacks + 1, MAINSTAY_MAX_STACKS)
+			m.exp = game_time() + MAINSTAY_MARK_DUR
+		else
+			mainstay_marks[target_unit] = { stacks = 1, exp = game_time() + MAINSTAY_MARK_DUR }
 		end
 	end
 
@@ -845,7 +912,10 @@ function M.init(owner_mod, ui_panel)
 			-- unhooked `func`, so they read every argument off ctx.
 			if mod._l10_on_hit then mod._l10_on_hit(ctx) end
 			if mod._l10_merc_on_hit then mod._l10_merc_on_hit(ctx) end
+			if mod._l10_bw_on_hit then mod._l10_bw_on_hit(ctx) end
+			if mod._l10_ws_on_hit then mod._l10_ws_on_hit(ctx) end
 			if mod._l20_on_hit then mod._l20_on_hit(ctx) end
+			if mod._l30_bh_on_hit then mod._l30_bh_on_hit(ctx) end
 			if mod._crit_on_hit then mod._crit_on_hit(ctx) end
 
 			KillTracker.commit_hit()
@@ -941,6 +1011,7 @@ function M.init(owner_mod, ui_panel)
 		-- Forward each melee swing start to the level-20 module (shared hook; it uses
 		-- swing boundaries to aggregate per-swing damage for the attack-speed sim).
 		if mod._l20_on_swing_start then mod._l20_on_swing_start(self, power_level) end
+		if mod._l10_ws_on_swing_start then mod._l10_ws_on_swing_start(self) end
 		-- Forward to the crit tracker: self._is_critical_strike is already set by the
 		-- unhooked func by the time this hook_safe callback runs, so it can count this
 		-- swing attempt (hit or not) as a melee crit roll.
@@ -1029,10 +1100,10 @@ function M.draw(gui)
 	local show_extra = extra_shown()
 	local tb = tb_mod_active()
 
-	-- Displayed talents: TB removed Mainstay, so drop that row while TB is loaded.
+	-- Displayed talents: all five in both modes (TB v37 re-added Mainstay).
 	local disp = {}
 	for _, t in ipairs(TALENTS15) do
-		if not (t == "mainstay" and tb) then disp[#disp + 1] = t end
+		disp[#disp + 1] = t
 	end
 	local n = #disp
 
@@ -1065,7 +1136,7 @@ function M.draw(gui)
 	ui.text(gui, "First Unit", x + T15_FIRST_COL, row_y(1), small, ui.grey)
 	ui.text(gui, "Uncapped", x + T15_UNCAP_COL, row_y(1), small, ui.grey)
 	ui.text(gui, "Early Kills", x + T15_KILLS_COL, row_y(1), small, ui.grey)
-	ui.text(gui, "Hits/Kill", x + T15_HPK_COL, row_y(1), small, ui.grey)
+	ui.text(gui, "Hits Saved", x + T15_HPK_COL, row_y(1), small, ui.grey)
 	ui.text(gui, "Real Total", x + T15_REAL_COL, row_y(1), small, ui.grey)
 
 	for i, talent in ipairs(disp) do
@@ -1087,11 +1158,12 @@ function M.draw(gui)
 		ui.text(gui, string.format("%.0f", first), x + T15_FIRST_COL, ry, FONT_SIZE, ui.white)
 		ui.text(gui, string.format("%.0f", uncapped), x + T15_UNCAP_COL, ry, FONT_SIZE, ui.white)
 
-		-- Early Kills = units this talent finished sooner; Hits/Kill = running average
-		-- hits-to-kill over every unit you killed (capped at the talent's early kill).
+		-- Early Kills = units this talent finished sooner; Hits Saved = average hits
+		-- fewer to kill (real hits minus the talent's kill hit), over EVERY unit you
+		-- killed -- 0.00 for a talent that never pulls a kill sooner (see kill_tracker).
 		local k = kget(talent)
 		ui.text(gui, string.format("%d", k.n), x + T15_KILLS_COL, ry, FONT_SIZE, ui.white)
-		ui.text(gui, k.hpk_n > 0 and string.format("%.1f", k.hpk_sum / k.hpk_n) or "-",
+		ui.text(gui, k.saved_n > 0 and string.format("%.2f", k.saved_sum / k.saved_n) or "-",
 			x + T15_HPK_COL, ry, FONT_SIZE, ui.white)
 		-- Real Total: extra damage that actually pulled kills sooner (kill-aware,
 		-- baseline-overkill discounted -- see kill_track).

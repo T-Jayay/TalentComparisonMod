@@ -143,7 +143,11 @@ local function finalize(unit, ce)
 	-- of the real, already-combat-shortened wait RFA itself is responsible for.
 	if is_merc_rfa(unit, ce) then
 		local rfa_seconds = base * 0.2
-		local total_pct = cycle_elapsed > 0 and (rfa_seconds / cycle_elapsed) * 100 or 0
+		-- RFA is a fixed instant discount applied at use, so it can never account
+		-- for MORE than the whole actual recharge time. When combat shortens the
+		-- wait below rfa_seconds the raw ratio would exceed 1 (e.g. 240%), which is
+		-- nonsensical -- clamp the share to 100%.
+		local total_pct = cycle_elapsed > 0 and math.clamp((rfa_seconds / cycle_elapsed) * 100, 0, 100) or 0
 		total_rec.last = total_pct
 		total_rec.sum = total_rec.sum + total_pct
 		total_rec.count = total_rec.count + 1
@@ -283,20 +287,28 @@ local function draw_panel(gui, rec, title, note, pos_x, pos_y, default_yfrac, dr
 	ui.text(gui, note, x, row_y(3), small, ui.grey)
 end
 
-function M.draw(gui)
-	-- Combat refund panel: every career.
+-- Combat Ult Refund panel (every career). Lives on the "Other Stats" tab.
+function M.draw_combat(gui)
 	draw_panel(gui, combat_rec, "Combat Ult Refund:",
 		"% of base cooldown saved by combat.",
 		"ultc_pos_x", "ultc_pos_y", 0.5, "ultc")
+end
 
-	-- Ready for Action panel: Mercenary with that talent only.
+-- Ready for Action is only meaningful for Mercenary with that L30 talent, so its
+-- panel (and the Lvl 30 tab entry that hosts it) only appears then.
+function M.rfa_wants_display()
 	local unit = local_player_unit()
 	local ce = unit and career_ext(unit)
-	if ce and is_merc_rfa(unit, ce) then
-		draw_panel(gui, total_rec, "Ready for Action:",
-			"RFA's share of the actual recharge time.",
-			"ultm_pos_x", "ultm_pos_y", 0.68, "ultm")
-	end
+	return (ce and is_merc_rfa(unit, ce)) == true
+end
+
+-- Ready for Action panel: a Mercenary L30 talent, so it is drawn under the
+-- Lvl 30 tab (routed via a draw-only wrapper in the entry file), NOT here.
+function M.draw_rfa(gui)
+	if not M.rfa_wants_display() then return end
+	draw_panel(gui, total_rec, "Ready for Action:",
+		"RFA's share of the actual recharge time.",
+		"ultm_pos_x", "ultm_pos_y", 0.68, "ultm")
 end
 
 function M.init(owner_mod, ui_panel)

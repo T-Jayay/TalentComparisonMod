@@ -153,7 +153,7 @@ end
 
 -- Kill-column record for `talent` from the shared tracker, or an all-zero default
 -- before its first credit (Deathknell / Riposte only; Flense has no kill column).
-local ZERO_KILLS = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
+local ZERO_KILLS = { n = 0, saved_sum = 0, saved_n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
 local function kget(talent)
 	return (l10_kt and l10_kt:get(talent)) or ZERO_KILLS
 end

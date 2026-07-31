@@ -171,7 +171,7 @@ end
 
 -- Kill-column record for `talent` from the shared tracker, or an all-zero default
 -- before its first credit (Reikland Reaper only; the ghost-swing talents have none).
-local ZERO_KILLS = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
+local ZERO_KILLS = { n = 0, saved_sum = 0, saved_n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
 local function kget(talent)
 	return (l20_kt and l20_kt:get(talent)) or ZERO_KILLS
 end

@@ -1,38 +1,94 @@
-Ever wonder how much value the talents you [i]didn't[/i] pick would have given you? This mod shows you running totals for your current run. For each talent in a row, it displays how much that talent [i]would have[/i] provided based on your real hits this run, whether or not you have it equipped. Each talent row gets its own on-screen panel that you can toggle, drag, and reset.
-[b]Most accurate when you are the host.[/b]
-[hr][/hr]
-[h2]Temp Health (Level 5)[/h2]
-Shows how much temporary health each Level 5 talent would have generated for you this run:
+[b]TalentComparisonMod — Feature List[/b]
+
+[h1]All Careers[/h1]
+
+[b]Level 5 — Temp Health[/b]
 [list]
-[*][b]Sting[/b] — from your first-target melee hits
-[*][b]Carve[/b] — from cleaving through multiple targets
-[*][b]Execute[/b] — from your melee kills
-[*][b]Second Wind[/b] — from staggering enemies
+[*] Sting — exact, calculated from real crit/headshot hits
+[*] Carve — exact, calculated from real cleave hits
+[*] Execute — exact, calculated from real melee kills
+[*] Second Wind — exact, calculated from real stagger events
+[*] Optional Tourney Balance cross-column — applies the other mod's formula to the same real events (see "Cross-mod estimate" below)
 [/list]
-So you can see at a glance which THP talent would actually have kept you healthiest for [i]your[/i] playstyle this run.
-Optional extra columns: how much of that healing would have [b]decayed[/b] away unused, what [b]percentage of the time[/b] each talent's healing would be actively decaying, and how much real [b]damage[/b] each talent's healing would have absorbed.
-[hr][/hr]
-[h2]Stagger Talents (Level 15)[/h2]
-Shows the extra melee damage each Level 15 stagger talent would have added this run, as [b]Total[/b] and [b]First-target[/b] running totals:
+
+[b]Level 15 — Damage/Stagger[/b]
 [list]
-[*][b]Mainstay[/b] — bonus damage vs. staggered / multi-staggered enemies
-[*][b]Smiter[/b] — first enemy hit counts as staggered
-[*][b]Bulwark[/b] — enemies you stagger take extra melee damage for a few seconds
-[*][b]Assassin[/b] — bonus damage vs. staggered, boosted on crits/headshots
-[*][b]Enhanced Power[/b] — a flat Power Level boost affecting damage, cleave, and stagger
+[*] Mainstay / Smiter / Assassin — exact, reconstructed by inverting each real hit's stagger math and reapplying each talent's rule (see "Stagger-number model")
+[*] Bulwark — exact, self-only, calculated directly from the aura's flat bonus term
+[*] Enhanced Power — exact, calculated by recomputing each real hit with the power boost applied (see "Power recompute"); cleave portion optionally measured directly if Force Cleave is enabled
+[*] Early Kills / Hits Saved — exact, calibrated against real applied damage (see "Kill tracker")
 [/list]
-A [b]Force Enhanced Power[/b] option can enable the extra cleave that Enhanced Power would grant, so you can see the additional enemies and damage it would physically hit.
-[hr][/hr]
-[h2]Other Comparison Panels[/h2]
-The mod also includes career-specific comparison panels:
+
+[b]Crit Tracker[/b]
 [list]
-[*][b]Witch Hunter Captain — Level 10[/b] (Riposte / Deathknell / Flense)
-[*][b]Mercenary — Level 20[/b] (Reikland Reaper / Enhanced Training / Strike Together)
-[*][b]Career Skill Cooldown Refund[/b] — how much of your ultimate's cooldown was refunded by combat, plus a Mercenary "Ready for Action" panel
+[*] All rows — exact, directly counted from real attack rolls and hits
 [/list]
-[hr][/hr]
-[h2]About Attack Speed Estimations[/h2]
-Some talents (like the Mercenary Level 20 row) grant [b]bonus attack speed[/b], which is hard to value directly. This mod estimates it with a "ghost swing" model: it takes your real swings this run and simulates the extra swings you [i]would have[/i] landed at the higher attack speed, valuing each ghosted swing at the damage of a real one. Because this assumes you'd have kept swinging non-stop, these attack-speed numbers are an [b]upper-bound estimate[/b], not an exact figure, treat them as "best case" value.
-[hr][/hr]
-[h2]Tourney Balance Support[/h2]
-If the [b]Tourney Balance[/b] mod is loaded, the panels automatically switch to Tourney Balance's reworked talent numbers so the comparisons stay accurate.
+
+[b]Career Ult Refund[/b]
+[list]
+[*] Combat Ult Refund — exact, calculated from real cooldown-timer changes each frame
+[/list]
+
+[h1]Career-Specific[/h1]
+
+[b]Witch Hunter Captain — Level 10[/b]
+[list]
+[*] Riposte — exact, recomputed from the real hit that would have been forced to crit
+[*] Deathknell — exact, recomputed from the real hit with the bonus applied
+[*] Flense — exact, measured directly (temporarily applied to your own character so real game DoT ticks can be counted)
+[/list]
+
+[b]Mercenary — Level 10[/b]
+[list]
+[*] More the Merrier — exact, calculated via power recompute
+[*] Limb Splitter — measured directly if Force Cleave is enabled, otherwise estimated
+[*] Helborg's Tutelage — exact net value, recomputed from real hits with the crit flag toggled both directions
+[/list]
+
+[b]Battle Wizard — Level 10[/b]
+[list]
+[*] Volcanic Force — exact, calculated via power recompute
+[*] Famished Flames — exact, both sides calculated directly from the post-hit damage split
+[*] Lingering Flames — estimated, projected forward from the first observed burn tick (see "Forward projection")
+[/list]
+
+[b]Waystalker — Level 10[/b]
+[list]
+[*] Blood Shot — estimated, valued as the damage of the next real shot after a melee kill
+[*] Serrated Shots — estimated, projected forward per hit (see "Forward projection")
+[*] Drakira's Alacrity — estimated via ghost-swing simulation (see "Attack-speed simulation")
+[/list]
+
+[b]Mercenary — Level 20[/b]
+[list]
+[*] Reikland Reaper — exact, calculated via power recompute
+[*] Enhanced Training — estimated via ghost-swing simulation
+[*] Strike Together — estimated, down-sampled from allies' reconstructed swing timing
+[*] Tourney Balance mode — same mechanisms, retuned to that mod's thresholds/values
+[/list]
+
+[b]Bounty Hunter — Level 30[/b]
+[list]
+[*] Just Reward / Double Shotted — estimated via an independent simulated cooldown per talent, so results don't depend on which is equipped (see "Simulated cooldown")
+[/list]
+
+[b]Mercenary — Level 30[/b]
+[list]
+[*] Ready for Action — exact, calculated from the real cooldown timer versus the talent's known fixed discount
+[/list]
+
+[h1]How the estimates work[/h1]
+
+[b]Stagger-number model:[/b] every hit's damage secretly depends on a hidden "stagger number." The mod reverses that math on each real hit to recover the base damage, then reapplies each talent's own stagger rule to see what that hit would have done instead.
+
+[b]Power recompute:[/b] for talents that boost Power Level, the mod re-runs the real hit's damage formula with the talent's power bonus added in, then reports the difference — same enemy, same hit, just with/without the bonus.
+
+[b]Kill tracker:[/b] tracks two running totals per enemy — damage with vs. without a given talent — and checks whether the "with" total would have killed the enemy sooner than reality did. Results are scaled against the real damage the enemy actually took, so they stay accurate even though the underlying math runs on a pre-final damage number.
+
+[b]Attack-speed simulation ("ghost swings"):[/b] for talents that speed up attacks rather than hit harder, the mod replays your real swing timeline at the faster rate and counts how many extra swings would have landed in that time, valuing each ghost swing at the same damage as a real nearby swing. This is an upper bound — it assumes every extra swing would have connected.
+
+[b]Forward projection:[/b] for damage-over-time effects that can't be safely applied to your character, the mod takes one real tick's damage and projects a full duration/tick-rate timeline forward from it, stopping at the enemy's remaining health. This is also an upper bound — it assumes the projected ticks all land.
+
+[b]Simulated cooldown:[/b] for cooldown-refund talents, the mod runs a private, invisible copy of your ability cooldown per talent, fed by your real combat pace but with the other talent's effects stripped out. This keeps each talent's number independent of which one you actually have equipped.
+
+[b]Cross-mod estimate:[/b] when comparing against another mod's rebalanced talents, real observed events (hits, staggers, crits) are re-scored using that mod's formulas. Where a value depends on a hidden game number that a loaded mod can silently change (e.g. weapon impact/stagger strength), the cross-mod value is a labeled estimate rather than an exact figure.

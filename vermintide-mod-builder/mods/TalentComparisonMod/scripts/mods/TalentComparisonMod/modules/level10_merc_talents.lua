@@ -152,7 +152,7 @@ end
 -- Kill-column record for `talent` from the shared tracker, or an all-zero default
 -- before its first credit. Helborg tracks two variants ("helborg" Official /
 -- "helborg_tb" TB), mirroring its two Total records.
-local ZERO_KILLS = { n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
+local ZERO_KILLS = { n = 0, saved_sum = 0, saved_n = 0, hpk_sum = 0, hpk_n = 0, real_total = 0 }
 local function kget(talent)
 	return (l10m_kt and l10m_kt:get(talent)) or ZERO_KILLS
 end
@@ -591,7 +591,9 @@ function M.draw(gui)
 	local est = forced and "" or " (est)"
 	-- Limb Splitter is measured (not estimated) while equipped, too.
 	local ls_est = (forced or ls_equipped) and "" or " (est)"
-	ui.text(gui, string.format("More the Merrier cleave: +%d units%s   |   Limb Splitter: +%d units%s",
+	-- Use %.0f (not %d): these unit counts can be floats, and %d on a non-integer
+	-- errors -> the game renders "<Invalid string format>". See CLAUDE.md.
+	ui.text(gui, string.format("More the Merrier cleave: +%.0f units%s   |   Limb Splitter: +%.0f units%s",
 		mtm_boost.extra_units_hit or 0, est, ls_boost.extra_units_hit or 0, ls_est),
 		x, row_y(5), small, ui.grey)
 

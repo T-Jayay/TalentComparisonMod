@@ -9,3 +9,6 @@ vermintide-mod-builder/*.log
 
 # IDE
 .idea/
+
+# Kusanagi sword mod — lives in its own repository (T-Jayay/KusanagiSword)
+vermintide-mod-builder/mods/CustomKruberSword/

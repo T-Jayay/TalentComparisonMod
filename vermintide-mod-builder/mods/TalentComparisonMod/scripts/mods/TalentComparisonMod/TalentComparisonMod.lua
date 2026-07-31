@@ -26,7 +26,10 @@ local thp   = mod:dofile(BASE .. "thp_talents")
 local level15 = mod:dofile(BASE .. "level15_talents")
 local level10 = mod:dofile(BASE .. "level10_whc_talents")
 local level10_merc = mod:dofile(BASE .. "level10_merc_talents")
+local level10_bw = mod:dofile(BASE .. "level10_bw_talents")
+local level10_ws = mod:dofile(BASE .. "level10_ws_talents")
 local level20 = mod:dofile(BASE .. "level20_merc_talents")
+local level30_bh = mod:dofile(BASE .. "level30_bh_talents")
 local ult_refund = mod:dofile(BASE .. "career_ult_refund")
 local crit_tracker = mod:dofile(BASE .. "crit_tracker")
 
@@ -41,7 +44,27 @@ local crit_tracker = mod:dofile(BASE .. "crit_tracker")
 -- owns mod._power_boost); its position after level15 in this list guarantees that.
 -- control_panel is FIRST: it is always drawn (even while everything else is hidden)
 -- so the Hide/Show + unit-filter buttons stay reachable.
-local groups = { control, gameplay, thp, level15, level10, level20, level10_merc, ult_refund, crit_tracker }
+-- level10_bw (Battle Wizard) also piggybacks on level15's shared calculate_damage
+-- hook via mod._l10_bw_on_hit and reuses mod._kill_tracker, so it must init AFTER
+-- level15 (which owns those); its position after level15 here guarantees that.
+-- level10_ws (Waystalker) also piggybacks on level15's shared calculate_damage /
+-- ActionSweep hooks via mod._l10_ws_* forwards and reuses the shared attack_speed_sim
+-- + dot_sim modules, so it must init AFTER level15; its position after it guarantees that.
+local groups = { control, gameplay, thp, level15, level10, level20, level10_merc, level10_bw, level10_ws, level30_bh, ult_refund, crit_tracker }
+
+-- Draw-only wrappers that route the two ult-refund panels onto different tabs
+-- (Combat Ult Refund -> Other Stats; Ready for Action -> Lvl 30, as a Mercenary
+-- L30 talent). The real career_ult_refund module stays in `groups` above so its
+-- shared cooldown-sampling engine still gets init/update/reset once; these facades
+-- only implement the wants_display/draw the tab loop calls.
+local ult_combat = {
+	wants_display = function () return true end,
+	draw = function (gui) ult_refund.draw_combat(gui) end,
+}
+local ult_rfa = {
+	wants_display = function () return ult_refund.rfa_wants_display() end,
+	draw = function (gui) ult_refund.draw_rfa(gui) end,
+}
 
 -- Tab bar (control panel): one TOGGLE button per tab, ordered by talent level,
 -- utility panels grouped under "Other Stats". Each tab independently shows/hides
@@ -50,10 +73,11 @@ local groups = { control, gameplay, thp, level15, level10, level20, level10_merc
 -- follow the current career).
 local TABS = {
 	{ id = "lvl5",  label = "Lvl 5",       groups = { thp } },
-	{ id = "lvl10", label = "Lvl 10",      groups = { level10, level10_merc } },
+	{ id = "lvl10", label = "Lvl 10",      groups = { level10, level10_merc, level10_bw, level10_ws } },
 	{ id = "lvl15", label = "Lvl 15",      groups = { level15 } },
 	{ id = "lvl20", label = "Lvl 20",      groups = { level20 } },
-	{ id = "other", label = "Other Stats", groups = { ult_refund, crit_tracker } },
+	{ id = "lvl30", label = "Lvl 30",      groups = { level30_bh, ult_rfa } },
+	{ id = "other", label = "Other Stats", groups = { ult_combat, crit_tracker } },
 }
 mod._tabs = TABS
 
